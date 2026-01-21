@@ -77,25 +77,16 @@ fn detect_repo_from_gh() -> Result<(String, String)> {
 }
 
 /// Detect PR for current branch using `gh pr view --json`.
-fn detect_pr_from_gh(owner: &str, repo: &str) -> Result<u64> {
+fn detect_pr_from_gh(_owner: &str, _repo: &str) -> Result<u64> {
+    // Don't pass --repo here; gh pr view auto-detects the current branch's PR
+    // only when no repo is specified. With --repo, it requires an explicit PR identifier.
     let output = Command::new("gh")
-        .args([
-            "pr",
-            "view",
-            "--repo",
-            &format!("{}/{}", owner, repo),
-            "--json",
-            "number",
-        ])
+        .args(["pr", "view", "--json", "number"])
         .output()
         .context("Failed to run 'gh pr view'")?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
-            "No PR found for current branch. Create a PR or use --pr flag. ({})",
-            stderr.trim()
-        );
+        anyhow::bail!("No PR found for current branch. Create a PR or use --pr flag.");
     }
 
     let view: GhPrView =

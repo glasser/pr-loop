@@ -17,11 +17,11 @@ pub struct Cli {
     pub pr: Option<u64>,
 
     /// Glob pattern for CI checks to include (can be repeated)
-    #[arg(long = "include-checks", global = true)]
+    #[arg(long = "include-checks", global = true, env = "PR_LOOP_INCLUDE_CHECKS", value_delimiter = ',')]
     pub include_checks: Vec<String>,
 
     /// Glob pattern for CI checks to exclude (can be repeated)
-    #[arg(long = "exclude-checks", global = true)]
+    #[arg(long = "exclude-checks", global = true, env = "PR_LOOP_EXCLUDE_CHECKS", value_delimiter = ',')]
     pub exclude_checks: Vec<String>,
 
     #[command(subcommand)]
@@ -149,5 +149,44 @@ mod tests {
         assert_eq!(cli.repo, Some("foo/bar".to_string()));
         assert_eq!(cli.pr, Some(42));
         assert!(matches!(cli.command, Some(Command::Reply { .. })));
+    }
+
+    #[test]
+    fn parse_check_filters_from_env() {
+        // Test that env vars work with comma-separated values
+        // SAFETY: Test runs single-threaded; no other code accesses these env vars concurrently
+        unsafe {
+            std::env::set_var("PR_LOOP_INCLUDE_CHECKS", "ci/*,build");
+            std::env::set_var("PR_LOOP_EXCLUDE_CHECKS", "lint,codecov/*");
+        }
+
+        let cli = Cli::parse_from(["pr-loop"]);
+        assert_eq!(cli.include_checks, vec!["ci/*", "build"]);
+        assert_eq!(cli.exclude_checks, vec!["lint", "codecov/*"]);
+
+        // Clean up
+        // SAFETY: Test runs single-threaded
+        unsafe {
+            std::env::remove_var("PR_LOOP_INCLUDE_CHECKS");
+            std::env::remove_var("PR_LOOP_EXCLUDE_CHECKS");
+        }
+    }
+
+    #[test]
+    fn cli_args_override_env() {
+        // Test that CLI args take precedence over env vars
+        // SAFETY: Test runs single-threaded; no other code accesses these env vars concurrently
+        unsafe {
+            std::env::set_var("PR_LOOP_INCLUDE_CHECKS", "from-env");
+        }
+
+        let cli = Cli::parse_from(["pr-loop", "--include-checks", "from-cli"]);
+        assert_eq!(cli.include_checks, vec!["from-cli"]);
+
+        // Clean up
+        // SAFETY: Test runs single-threaded
+        unsafe {
+            std::env::remove_var("PR_LOOP_INCLUDE_CHECKS");
+        }
     }
 }
