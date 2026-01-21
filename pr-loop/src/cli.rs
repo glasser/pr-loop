@@ -24,6 +24,18 @@ pub struct Cli {
     #[arg(long = "exclude-checks", global = true, env = "PR_LOOP_EXCLUDE_CHECKS", value_delimiter = ',')]
     pub exclude_checks: Vec<String>,
 
+    /// Wait until the PR becomes actionable (has comments needing response or CI failures)
+    #[arg(long)]
+    pub wait_until_actionable: bool,
+
+    /// Timeout in seconds for --wait-until-actionable (default: 1800 = 30 minutes)
+    #[arg(long, default_value = "1800")]
+    pub timeout: u64,
+
+    /// Polling interval in seconds for --wait-until-actionable (default: 30)
+    #[arg(long, default_value = "30")]
+    pub poll_interval: u64,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -188,5 +200,28 @@ mod tests {
         unsafe {
             std::env::remove_var("PR_LOOP_INCLUDE_CHECKS");
         }
+    }
+
+    #[test]
+    fn parse_wait_until_actionable() {
+        let cli = Cli::parse_from(["pr-loop", "--wait-until-actionable"]);
+        assert!(cli.wait_until_actionable);
+        assert_eq!(cli.timeout, 1800); // default 30 minutes
+        assert_eq!(cli.poll_interval, 30); // default 30 seconds
+    }
+
+    #[test]
+    fn parse_wait_with_custom_timeout() {
+        let cli = Cli::parse_from([
+            "pr-loop",
+            "--wait-until-actionable",
+            "--timeout",
+            "600",
+            "--poll-interval",
+            "10",
+        ]);
+        assert!(cli.wait_until_actionable);
+        assert_eq!(cli.timeout, 600);
+        assert_eq!(cli.poll_interval, 10);
     }
 }

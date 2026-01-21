@@ -8,6 +8,7 @@ mod credentials;
 mod github;
 mod reply;
 mod threads;
+mod wait;
 
 use analysis::{analyze_pr, NextAction};
 use checks::{get_checks_summary, ChecksSummary, RealChecksClient};
@@ -17,6 +18,7 @@ use credentials::{CredentialProvider, RealCredentialProvider};
 use github::{resolve_pr_context, RealGitHubClient};
 use reply::{format_claude_message, RealReplyClient, ReplyClient};
 use threads::{RealThreadsClient, ThreadsClient, CLAUDE_MARKER};
+use wait::{wait_until_actionable, WaitResult};
 
 fn main() {
     let cli = Cli::parse();
@@ -78,8 +80,37 @@ fn main() {
             }
         }
         None => {
-            // Fetch checks
             let checks_client = RealChecksClient;
+            let threads_client = RealThreadsClient;
+
+            // If --wait-until-actionable, poll until something needs attention
+            if cli.wait_until_actionable {
+                match wait_until_actionable(
+                    &checks_client,
+                    &threads_client,
+                    &pr_context.owner,
+                    &pr_context.repo,
+                    pr_context.pr_number,
+                    &cli.include_checks,
+                    &cli.exclude_checks,
+                    cli.timeout,
+                    cli.poll_interval,
+                ) {
+                    Ok(WaitResult::Actionable) => {
+                        eprintln!("PR is now actionable.");
+                    }
+                    Ok(WaitResult::Timeout) => {
+                        eprintln!("Timeout reached without PR becoming actionable.");
+                        std::process::exit(2);
+                    }
+                    Err(e) => {
+                        eprintln!("Error while waiting: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+
+            // Fetch checks
             let checks_summary = match get_checks_summary(
                 &checks_client,
                 &pr_context.owner,
@@ -97,7 +128,6 @@ fn main() {
             };
 
             // Fetch review threads
-            let threads_client = RealThreadsClient;
             let threads = match threads_client.fetch_threads(
                 &pr_context.owner,
                 &pr_context.repo,
@@ -193,7 +223,11 @@ fn print_recommendation(
                 println!("  ✗ {}", name);
             }
             println!();
-            println!("Investigate the failures and push fixes.");
+            println!("Use the CircleCI MCP server to investigate the failures:");
+            println!("  - List recent pipelines for this project");
+            println!("  - Get job details and logs for the failed workflow");
+            println!();
+            println!("Then push fixes to resolve the issues.");
         }
 
         NextAction::WaitForCi { pending_check_names } => {
