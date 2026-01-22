@@ -45,6 +45,16 @@ pub struct Cli {
     #[arg(long, default_value = "30")]
     pub min_wait_after_push: u64,
 
+    /// Maintain a status block in the PR description indicating LLM iteration is in progress.
+    /// Requires the PR to be in draft mode.
+    #[arg(long)]
+    pub maintain_status: bool,
+
+    /// Custom status message to include in the PR description status block.
+    /// Only used when --maintain-status is set.
+    #[arg(long)]
+    pub status_message: Option<String>,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -65,6 +75,11 @@ pub enum Command {
         #[arg(long)]
         resolve: bool,
     },
+
+    /// Mark the PR as ready for review.
+    /// Validates the PR is happy (CI passing, no unresolved threads), removes the status block,
+    /// and marks the PR as non-draft.
+    Ready,
 }
 
 #[cfg(test)]
@@ -259,5 +274,41 @@ mod tests {
         ]);
         assert!(cli.wait_until_actionable_or_happy);
         assert_eq!(cli.min_wait_after_push, 60);
+    }
+
+    #[test]
+    fn parse_maintain_status() {
+        let cli = Cli::parse_from(["pr-loop", "--maintain-status"]);
+        assert!(cli.maintain_status);
+        assert!(cli.status_message.is_none());
+    }
+
+    #[test]
+    fn parse_maintain_status_with_message() {
+        let cli = Cli::parse_from([
+            "pr-loop",
+            "--maintain-status",
+            "--status-message",
+            "Struggling with CI failures",
+        ]);
+        assert!(cli.maintain_status);
+        assert_eq!(
+            cli.status_message,
+            Some("Struggling with CI failures".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_ready_command() {
+        let cli = Cli::parse_from(["pr-loop", "ready"]);
+        assert!(matches!(cli.command, Some(Command::Ready)));
+    }
+
+    #[test]
+    fn parse_ready_command_with_global_args() {
+        let cli = Cli::parse_from(["pr-loop", "--repo", "owner/repo", "--pr", "123", "ready"]);
+        assert_eq!(cli.repo, Some("owner/repo".to_string()));
+        assert_eq!(cli.pr, Some(123));
+        assert!(matches!(cli.command, Some(Command::Ready)));
     }
 }

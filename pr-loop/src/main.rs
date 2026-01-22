@@ -8,6 +8,7 @@ mod cli;
 mod credentials;
 mod git;
 mod github;
+mod pr;
 mod reply;
 mod threads;
 mod wait;
@@ -21,10 +22,11 @@ use clap::Parser;
 use cli::{Cli, Command};
 use credentials::{CredentialProvider, Credentials, RealCredentialProvider};
 use git::RealGitClient;
-use github::{resolve_pr_context, RealGitHubClient};
+use github::{resolve_pr_context, PrContext, RealGitHubClient};
+use pr::{has_status_block, remove_status_block, update_body_with_status, PrClient, RealPrClient};
 use reply::{format_claude_message, RealReplyClient, ReplyClient};
 use threads::{RealThreadsClient, ThreadsClient, CLAUDE_MARKER};
-use wait::{wait_until_actionable, wait_until_actionable_or_happy, WaitResult};
+use wait::{capture_snapshot, wait_until_actionable, wait_until_actionable_or_happy, WaitResult};
 
 fn main() {
     let cli = Cli::parse();
@@ -53,6 +55,36 @@ fn main() {
             std::process::exit(1);
         }
     };
+
+    // Initialize PR client for status operations
+    let pr_client = RealPrClient;
+
+    // If --maintain-status is set, check draft mode first
+    if cli.maintain_status {
+        match pr_client.is_draft(&pr_context.owner, &pr_context.repo, pr_context.pr_number) {
+            Ok(true) => {
+                // Good, PR is in draft mode
+            }
+            Ok(false) => {
+                eprintln!("Error: --maintain-status requires the PR to be in draft mode.");
+                eprintln!("It's not polite to iterate with an AI on a non-draft PR!");
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("Error: Failed to check PR draft status: {}", e);
+                std::process::exit(1);
+            }
+        }
+
+        // Update the status block
+        if let Err(e) = update_pr_status(
+            &pr_client,
+            &pr_context,
+            cli.status_message.as_deref(),
+        ) {
+            eprintln!("Warning: Failed to update PR status: {}", e);
+        }
+    }
 
     match cli.command {
         Some(Command::Reply {
@@ -85,6 +117,16 @@ fn main() {
                 }
             }
         }
+
+        Some(Command::Ready) => {
+            run_ready_command(
+                &pr_client,
+                &pr_context,
+                &cli.include_checks,
+                &cli.exclude_checks,
+            );
+        }
+
         None => {
             let checks_client = RealChecksClient;
             let threads_client = RealThreadsClient;
@@ -389,5 +431,132 @@ fn truncate_log_tail(s: &str, max_len: usize) -> String {
         // Find the next newline to start on a line boundary
         let start = s[start..].find('\n').map(|i| start + i + 1).unwrap_or(start);
         format!("[... {} bytes truncated]\n{}", start, &s[start..])
+    }
+}
+
+/// Update the PR description with a status block.
+fn update_pr_status(
+    pr_client: &dyn PrClient,
+    pr_context: &PrContext,
+    status_message: Option<&str>,
+) -> anyhow::Result<()> {
+    let current_body = pr_client.get_body(&pr_context.owner, &pr_context.repo, pr_context.pr_number)?;
+    let new_body = update_body_with_status(&current_body, status_message);
+    pr_client.set_body(&pr_context.owner, &pr_context.repo, pr_context.pr_number, &new_body)?;
+    eprintln!("✓ Updated PR status block");
+    Ok(())
+}
+
+/// Run the `ready` subcommand.
+fn run_ready_command(
+    pr_client: &dyn PrClient,
+    pr_context: &PrContext,
+    include_checks: &[String],
+    exclude_checks: &[String],
+) {
+    let checks_client = RealChecksClient;
+    let threads_client = RealThreadsClient;
+
+    // Step 1: Check that PR is in draft mode
+    println!("Checking PR draft status...");
+    match pr_client.is_draft(&pr_context.owner, &pr_context.repo, pr_context.pr_number) {
+        Ok(true) => {
+            println!("✓ PR is in draft mode");
+        }
+        Ok(false) => {
+            eprintln!("Error: PR is not in draft mode. The 'ready' command is for marking draft PRs as ready.");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("Error: Failed to check PR draft status: {}", e);
+            std::process::exit(1);
+        }
+    }
+
+    // Step 2: Validate PR is "happy" (no unresolved threads, CI passing)
+    println!("Validating PR state...");
+    let snapshot = match capture_snapshot(
+        &checks_client,
+        &threads_client,
+        &pr_context.owner,
+        &pr_context.repo,
+        pr_context.pr_number,
+        include_checks,
+        exclude_checks,
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error: Failed to check PR state: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    if !snapshot.actionable_thread_ids.is_empty() {
+        eprintln!(
+            "Error: PR has {} unresolved review thread(s). Address them before marking ready.",
+            snapshot.actionable_thread_ids.len()
+        );
+        std::process::exit(1);
+    }
+
+    if !snapshot.failed_check_names.is_empty() {
+        eprintln!(
+            "Error: PR has {} failing CI check(s): {}",
+            snapshot.failed_check_names.len(),
+            snapshot.failed_check_names.iter().cloned().collect::<Vec<_>>().join(", ")
+        );
+        std::process::exit(1);
+    }
+
+    if !snapshot.pending_check_names.is_empty() {
+        eprintln!(
+            "Error: PR has {} pending CI check(s): {}",
+            snapshot.pending_check_names.len(),
+            snapshot.pending_check_names.iter().cloned().collect::<Vec<_>>().join(", ")
+        );
+        eprintln!("Wait for CI to complete before marking ready.");
+        std::process::exit(1);
+    }
+
+    println!("✓ No unresolved threads");
+    println!("✓ All CI checks passed");
+
+    // Step 3: Remove status block from PR description
+    println!("Removing status block from PR description...");
+    match pr_client.get_body(&pr_context.owner, &pr_context.repo, pr_context.pr_number) {
+        Ok(body) => {
+            if has_status_block(&body) {
+                let new_body = remove_status_block(&body);
+                if let Err(e) = pr_client.set_body(
+                    &pr_context.owner,
+                    &pr_context.repo,
+                    pr_context.pr_number,
+                    &new_body,
+                ) {
+                    eprintln!("Warning: Failed to remove status block: {}", e);
+                } else {
+                    println!("✓ Status block removed");
+                }
+            } else {
+                println!("  (no status block present)");
+            }
+        }
+        Err(e) => {
+            eprintln!("Warning: Failed to get PR body: {}", e);
+        }
+    }
+
+    // Step 4: Mark PR as ready (non-draft)
+    println!("Marking PR as ready for review...");
+    match pr_client.mark_ready(&pr_context.owner, &pr_context.repo, pr_context.pr_number) {
+        Ok(()) => {
+            println!("✓ PR marked as ready for review");
+            println!();
+            println!("🎉 PR is now ready for human review!");
+        }
+        Err(e) => {
+            eprintln!("Error: Failed to mark PR as ready: {}", e);
+            std::process::exit(1);
+        }
     }
 }
