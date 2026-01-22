@@ -8,6 +8,7 @@ use std::process::Command;
 /// A comment in a review thread.
 #[derive(Debug, Clone)]
 pub struct ThreadComment {
+    pub id: String,
     pub author: String,
     pub body: String,
 }
@@ -43,6 +44,18 @@ impl ReviewThread {
             Some(comment) => !comment.body.starts_with(CLAUDE_MARKER),
             None => false, // Empty thread, nothing to respond to
         }
+    }
+
+    /// Returns true if all comments in this thread are from Claude.
+    /// Empty threads are not considered "pure Claude".
+    pub fn is_pure_claude(&self) -> bool {
+        !self.comments.is_empty()
+            && self.comments.iter().all(|c| c.body.starts_with(CLAUDE_MARKER))
+    }
+
+    /// Returns the IDs of all comments in this thread.
+    pub fn comment_ids(&self) -> Vec<&str> {
+        self.comments.iter().map(|c| c.id.as_str()).collect()
     }
 }
 
@@ -143,6 +156,7 @@ struct CommentsConnection {
 
 #[derive(Deserialize)]
 struct CommentNode {
+    id: String,
     author: Option<AuthorNode>,
     body: String,
 }
@@ -170,6 +184,7 @@ fn fetch_threads_from_graphql(
                             line
                             comments(first: 100) {
                                 nodes {
+                                    id
                                     author {
                                         login
                                     }
@@ -231,6 +246,7 @@ fn fetch_threads_from_graphql(
                 .nodes
                 .into_iter()
                 .map(|c| ThreadComment {
+                    id: c.id,
                     author: c.author.map(|a| a.login).unwrap_or_else(|| "ghost".to_string()),
                     body: c.body,
                 })
@@ -261,6 +277,7 @@ mod tests {
 
     fn make_comment(author: &str, body: &str) -> ThreadComment {
         ThreadComment {
+            id: format!("comment_{}", body.len()),
             author: author.to_string(),
             body: body.to_string(),
         }
@@ -402,5 +419,63 @@ mod tests {
         thread.line = None;
         let actionable = ActionableThread { thread };
         assert_eq!(actionable.location(), "src/main.rs");
+    }
+
+    #[test]
+    fn is_pure_claude_all_claude_comments() {
+        let thread = make_thread(
+            "T1",
+            true,
+            vec![
+                make_comment("claude-bot", "🤖 From Claude: First"),
+                make_comment("claude-bot", "🤖 From Claude: Second"),
+            ],
+        );
+        assert!(thread.is_pure_claude());
+    }
+
+    #[test]
+    fn is_pure_claude_mixed_comments() {
+        let thread = make_thread(
+            "T1",
+            true,
+            vec![
+                make_comment("reviewer", "Please fix this"),
+                make_comment("claude-bot", "🤖 From Claude: Fixed!"),
+            ],
+        );
+        assert!(!thread.is_pure_claude());
+    }
+
+    #[test]
+    fn is_pure_claude_no_claude_comments() {
+        let thread = make_thread("T1", true, vec![make_comment("reviewer", "Looks good")]);
+        assert!(!thread.is_pure_claude());
+    }
+
+    #[test]
+    fn is_pure_claude_empty_thread() {
+        let thread = ReviewThread {
+            id: "T1".to_string(),
+            is_resolved: true,
+            path: None,
+            line: None,
+            comments: vec![],
+        };
+        assert!(!thread.is_pure_claude());
+    }
+
+    #[test]
+    fn comment_ids_returns_all_ids() {
+        let thread = make_thread(
+            "T1",
+            false,
+            vec![
+                make_comment("a", "first"),
+                make_comment("b", "second"),
+            ],
+        );
+        let ids = thread.comment_ids();
+        assert_eq!(ids.len(), 2);
     }
 }

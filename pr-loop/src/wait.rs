@@ -14,6 +14,8 @@ use std::time::{Duration, Instant, SystemTime};
 pub struct PrSnapshot {
     /// IDs of threads that need a response (unresolved, last comment not from Claude)
     pub actionable_thread_ids: HashSet<String>,
+    /// IDs of all unresolved threads (regardless of who commented last)
+    pub unresolved_thread_ids: HashSet<String>,
     /// Names of failed CI checks
     pub failed_check_names: HashSet<String>,
     /// Names of pending CI checks
@@ -71,6 +73,14 @@ pub fn capture_snapshot(
         .fetch_threads(owner, repo, pr_number)
         .unwrap_or_default();
 
+    // All unresolved threads (regardless of who commented last)
+    let unresolved_thread_ids: HashSet<String> = threads
+        .iter()
+        .filter(|t| !t.is_resolved)
+        .map(|t| t.id.clone())
+        .collect();
+
+    // Actionable threads (unresolved AND last comment not from Claude)
     let actionable_thread_ids: HashSet<String> = threads
         .into_iter()
         .filter(|t| {
@@ -87,6 +97,7 @@ pub fn capture_snapshot(
 
     Ok(PrSnapshot {
         actionable_thread_ids,
+        unresolved_thread_ids,
         failed_check_names,
         pending_check_names,
     })
@@ -271,6 +282,7 @@ mod tests {
             path: Some("test.rs".to_string()),
             line: Some(1),
             comments: vec![ThreadComment {
+                id: format!("comment_{}", id),
                 author: "reviewer".to_string(),
                 body: last_comment_body.to_string(),
             }],
@@ -422,6 +434,7 @@ mod tests {
     fn snapshot_is_ci_happy_all_passing() {
         let snapshot = PrSnapshot {
             actionable_thread_ids: HashSet::new(),
+            unresolved_thread_ids: HashSet::new(),
             failed_check_names: HashSet::new(),
             pending_check_names: HashSet::new(),
         };
@@ -434,6 +447,7 @@ mod tests {
         pending.insert("build".to_string());
         let snapshot = PrSnapshot {
             actionable_thread_ids: HashSet::new(),
+            unresolved_thread_ids: HashSet::new(),
             failed_check_names: HashSet::new(),
             pending_check_names: pending,
         };
@@ -446,6 +460,7 @@ mod tests {
         failed.insert("test".to_string());
         let snapshot = PrSnapshot {
             actionable_thread_ids: HashSet::new(),
+            unresolved_thread_ids: HashSet::new(),
             failed_check_names: failed,
             pending_check_names: HashSet::new(),
         };
@@ -456,6 +471,7 @@ mod tests {
     fn snapshot_is_happy_no_comments_ci_passing() {
         let snapshot = PrSnapshot {
             actionable_thread_ids: HashSet::new(),
+            unresolved_thread_ids: HashSet::new(),
             failed_check_names: HashSet::new(),
             pending_check_names: HashSet::new(),
         };
@@ -468,6 +484,7 @@ mod tests {
         threads.insert("T1".to_string());
         let snapshot = PrSnapshot {
             actionable_thread_ids: threads,
+            unresolved_thread_ids: HashSet::new(),
             failed_check_names: HashSet::new(),
             pending_check_names: HashSet::new(),
         };
@@ -480,6 +497,7 @@ mod tests {
         pending.insert("build".to_string());
         let snapshot = PrSnapshot {
             actionable_thread_ids: HashSet::new(),
+            unresolved_thread_ids: HashSet::new(),
             failed_check_names: HashSet::new(),
             pending_check_names: pending,
         };

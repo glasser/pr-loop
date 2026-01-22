@@ -79,7 +79,12 @@ pub enum Command {
     /// Mark the PR as ready for review.
     /// Validates the PR is happy (CI passing, no unresolved threads), removes the status block,
     /// and marks the PR as non-draft.
-    Ready,
+    Ready {
+        /// Delete review threads where all comments are from Claude (resolved threads only).
+        /// These are typically noise from the LLM iteration process.
+        #[arg(long)]
+        delete_claude_threads: bool,
+    },
 }
 
 #[cfg(test)]
@@ -301,7 +306,12 @@ mod tests {
     #[test]
     fn parse_ready_command() {
         let cli = Cli::parse_from(["pr-loop", "ready"]);
-        assert!(matches!(cli.command, Some(Command::Ready)));
+        match cli.command {
+            Some(Command::Ready { delete_claude_threads }) => {
+                assert!(!delete_claude_threads);
+            }
+            _ => panic!("Expected Ready command"),
+        }
     }
 
     #[test]
@@ -309,6 +319,22 @@ mod tests {
         let cli = Cli::parse_from(["pr-loop", "--repo", "owner/repo", "--pr", "123", "ready"]);
         assert_eq!(cli.repo, Some("owner/repo".to_string()));
         assert_eq!(cli.pr, Some(123));
-        assert!(matches!(cli.command, Some(Command::Ready)));
+        match cli.command {
+            Some(Command::Ready { delete_claude_threads }) => {
+                assert!(!delete_claude_threads);
+            }
+            _ => panic!("Expected Ready command"),
+        }
+    }
+
+    #[test]
+    fn parse_ready_command_with_delete_claude_threads() {
+        let cli = Cli::parse_from(["pr-loop", "ready", "--delete-claude-threads"]);
+        match cli.command {
+            Some(Command::Ready { delete_claude_threads }) => {
+                assert!(delete_claude_threads);
+            }
+            _ => panic!("Expected Ready command"),
+        }
     }
 }

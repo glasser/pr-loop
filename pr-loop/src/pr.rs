@@ -22,6 +22,9 @@ pub trait PrClient {
 
     /// Mark the PR as ready for review (non-draft).
     fn mark_ready(&self, owner: &str, repo: &str, pr_number: u64) -> Result<()>;
+
+    /// Get the number of commits in the PR.
+    fn get_commit_count(&self, owner: &str, repo: &str, pr_number: u64) -> Result<usize>;
 }
 
 /// Real PR client that uses the `gh` CLI.
@@ -130,6 +133,42 @@ impl PrClient for RealPrClient {
 
         Ok(())
     }
+
+    fn get_commit_count(&self, owner: &str, repo: &str, pr_number: u64) -> Result<usize> {
+        let output = Command::new("gh")
+            .args([
+                "pr",
+                "view",
+                &pr_number.to_string(),
+                "--repo",
+                &format!("{}/{}", owner, repo),
+                "--json",
+                "commits",
+            ])
+            .output()
+            .context("Failed to run 'gh pr view'")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("Failed to get PR commits: {}", stderr.trim());
+        }
+
+        #[derive(Deserialize)]
+        struct CommitInfo {
+            #[allow(dead_code)]
+            oid: String,
+        }
+
+        #[derive(Deserialize)]
+        struct CommitsOnly {
+            commits: Vec<CommitInfo>,
+        }
+
+        let view: CommitsOnly =
+            serde_json::from_slice(&output.stdout).context("Failed to parse PR commits")?;
+
+        Ok(view.commits.len())
+    }
 }
 
 /// Build the status block content for the PR description.
@@ -206,6 +245,7 @@ mod tests {
         pub body: String,
         pub set_body_called: std::cell::RefCell<Option<String>>,
         pub mark_ready_called: std::cell::RefCell<bool>,
+        pub commit_count: usize,
     }
 
     impl TestPrClient {
@@ -215,7 +255,14 @@ mod tests {
                 body: body.to_string(),
                 set_body_called: std::cell::RefCell::new(None),
                 mark_ready_called: std::cell::RefCell::new(false),
+                commit_count: 1,
             }
+        }
+
+        #[allow(dead_code)]
+        pub fn with_commit_count(mut self, count: usize) -> Self {
+            self.commit_count = count;
+            self
         }
     }
 
@@ -236,6 +283,10 @@ mod tests {
         fn mark_ready(&self, _owner: &str, _repo: &str, _pr_number: u64) -> Result<()> {
             *self.mark_ready_called.borrow_mut() = true;
             Ok(())
+        }
+
+        fn get_commit_count(&self, _owner: &str, _repo: &str, _pr_number: u64) -> Result<usize> {
+            Ok(self.commit_count)
         }
     }
 

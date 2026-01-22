@@ -76,6 +76,7 @@ mod tests {
 
     fn make_comment(author: &str, body: &str) -> ThreadComment {
         ThreadComment {
+            id: format!("comment_{}", body.len()),
             author: author.to_string(),
             body: body.to_string(),
         }

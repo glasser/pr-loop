@@ -118,12 +118,13 @@ fn main() {
             }
         }
 
-        Some(Command::Ready) => {
+        Some(Command::Ready { delete_claude_threads }) => {
             run_ready_command(
                 &pr_client,
                 &pr_context,
                 &cli.include_checks,
                 &cli.exclude_checks,
+                delete_claude_threads,
             );
         }
 
@@ -453,9 +454,11 @@ fn run_ready_command(
     pr_context: &PrContext,
     include_checks: &[String],
     exclude_checks: &[String],
+    delete_claude_threads: bool,
 ) {
     let checks_client = RealChecksClient;
     let threads_client = RealThreadsClient;
+    let reply_client = RealReplyClient;
 
     // Step 1: Check that PR is in draft mode
     println!("Checking PR draft status...");
@@ -473,7 +476,29 @@ fn run_ready_command(
         }
     }
 
-    // Step 2: Validate PR is "happy" (no unresolved threads, CI passing)
+    // Step 2: Check that PR has exactly one commit
+    println!("Checking PR commit count...");
+    match pr_client.get_commit_count(&pr_context.owner, &pr_context.repo, pr_context.pr_number) {
+        Ok(1) => {
+            println!("✓ PR has a single commit");
+        }
+        Ok(count) => {
+            eprintln!("Error: PR has {} commits. Please squash to a single commit before marking ready.", count);
+            eprintln!();
+            eprintln!("To squash commits interactively:");
+            eprintln!("  git rebase -i HEAD~{}", count);
+            eprintln!();
+            eprintln!("Or to squash all commits on this branch:");
+            eprintln!("  git reset --soft $(git merge-base HEAD main) && git commit");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("Error: Failed to check PR commit count: {}", e);
+            std::process::exit(1);
+        }
+    }
+
+    // Step 3: Validate PR is "happy" (no unresolved threads, CI passing)
     println!("Validating PR state...");
     let snapshot = match capture_snapshot(
         &checks_client,
@@ -491,10 +516,11 @@ fn run_ready_command(
         }
     };
 
-    if !snapshot.actionable_thread_ids.is_empty() {
+    // Check for unresolved threads (ALL threads must be resolved, not just non-actionable)
+    if !snapshot.unresolved_thread_ids.is_empty() {
         eprintln!(
-            "Error: PR has {} unresolved review thread(s). Address them before marking ready.",
-            snapshot.actionable_thread_ids.len()
+            "Error: PR has {} unresolved review thread(s). All threads must be resolved before marking ready.",
+            snapshot.unresolved_thread_ids.len()
         );
         std::process::exit(1);
     }
@@ -518,10 +544,43 @@ fn run_ready_command(
         std::process::exit(1);
     }
 
-    println!("✓ No unresolved threads");
+    println!("✓ All threads resolved");
     println!("✓ All CI checks passed");
 
-    // Step 3: Remove status block from PR description
+    // Step 4: Optionally delete pure-Claude threads
+    if delete_claude_threads {
+        println!("Deleting pure-Claude threads...");
+        match threads_client.fetch_threads(&pr_context.owner, &pr_context.repo, pr_context.pr_number) {
+            Ok(threads) => {
+                let pure_claude_threads: Vec<_> = threads
+                    .iter()
+                    .filter(|t| t.is_resolved && t.is_pure_claude())
+                    .collect();
+
+                if pure_claude_threads.is_empty() {
+                    println!("  (no pure-Claude threads found)");
+                } else {
+                    let mut deleted_count = 0;
+                    for thread in pure_claude_threads {
+                        for comment_id in thread.comment_ids() {
+                            match reply_client.delete_comment(comment_id) {
+                                Ok(()) => deleted_count += 1,
+                                Err(e) => {
+                                    eprintln!("Warning: Failed to delete comment {}: {}", comment_id, e);
+                                }
+                            }
+                        }
+                    }
+                    println!("✓ Deleted {} comment(s) from pure-Claude threads", deleted_count);
+                }
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to fetch threads for deletion: {}", e);
+            }
+        }
+    }
+
+    // Step 5: Remove status block from PR description
     println!("Removing status block from PR description...");
     match pr_client.get_body(&pr_context.owner, &pr_context.repo, pr_context.pr_number) {
         Ok(body) => {
@@ -546,7 +605,7 @@ fn run_ready_command(
         }
     }
 
-    // Step 4: Mark PR as ready (non-draft)
+    // Step 6: Mark PR as ready (non-draft)
     println!("Marking PR as ready for review...");
     match pr_client.mark_ready(&pr_context.owner, &pr_context.repo, pr_context.pr_number) {
         Ok(()) => {

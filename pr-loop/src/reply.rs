@@ -16,6 +16,7 @@ pub struct ReplyResult {
 pub trait ReplyClient {
     fn post_reply(&self, thread_id: &str, body: &str) -> Result<ReplyResult>;
     fn resolve_thread(&self, thread_id: &str) -> Result<()>;
+    fn delete_comment(&self, comment_id: &str) -> Result<()>;
 }
 
 /// Real client that uses `gh api graphql`.
@@ -28,6 +29,10 @@ impl ReplyClient for RealReplyClient {
 
     fn resolve_thread(&self, thread_id: &str) -> Result<()> {
         resolve_thread_graphql(thread_id)
+    }
+
+    fn delete_comment(&self, comment_id: &str) -> Result<()> {
+        delete_comment_graphql(comment_id)
     }
 }
 
@@ -128,6 +133,39 @@ fn post_reply_graphql(thread_id: &str, body: &str) -> Result<ReplyResult> {
     Ok(ReplyResult { comment_id })
 }
 
+/// Delete a PR review comment using GraphQL.
+fn delete_comment_graphql(comment_id: &str) -> Result<()> {
+    let mutation = r#"
+        mutation($commentId: ID!) {
+            deletePullRequestReviewComment(input: {
+                id: $commentId
+            }) {
+                clientMutationId
+            }
+        }
+    "#;
+
+    let output = Command::new("gh")
+        .args([
+            "api",
+            "graphql",
+            "-f",
+            &format!("query={}", mutation),
+            "-f",
+            &format!("commentId={}", comment_id),
+        ])
+        .output()
+        .context("Failed to run 'gh api graphql' for delete comment")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("GraphQL mutation failed: {}", stderr.trim());
+    }
+
+    // We don't need to parse the response - success is enough
+    Ok(())
+}
+
 /// Resolve a thread using GraphQL.
 fn resolve_thread_graphql(thread_id: &str) -> Result<()> {
     let mutation = r#"
@@ -207,6 +245,14 @@ mod tests {
         }
 
         fn resolve_thread(&self, _thread_id: &str) -> Result<()> {
+            if self.should_fail {
+                anyhow::bail!("Test failure")
+            } else {
+                Ok(())
+            }
+        }
+
+        fn delete_comment(&self, _comment_id: &str) -> Result<()> {
             if self.should_fail {
                 anyhow::bail!("Test failure")
             } else {
