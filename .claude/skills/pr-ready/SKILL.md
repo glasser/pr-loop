@@ -10,7 +10,7 @@ Mark a draft PR as ready for human review. This validates the PR is in a good st
 
 ## Instructions
 
-Run `pr-loop ready` to:
+Run `pr-loop ready` to (add `--delete-claude-threads` if user passed "delete" as an argument to this skill):
 
 1. Verify the PR is currently in draft mode
 2. Verify the PR has exactly one commit (fail with squash instructions if not)
@@ -55,13 +55,7 @@ Marking PR as ready for review...
 
 When iterating with an LLM, you may end up with review threads where all comments are from Claude (e.g., Claude talking to itself during iterations). These can be noise for human reviewers.
 
-**Do not use this option unless the user specifically requests it.**
-
-If requested, use `--delete-claude-threads` to automatically delete these threads:
-
-```
-pr-loop ready --delete-claude-threads
-```
+**Do not use this option unless the user specifically requests it** (e.g., `/pr-ready delete`).
 
 This will delete all comments in resolved threads where every comment starts with the Claude marker. Threads with any non-Claude comments are preserved.
 
