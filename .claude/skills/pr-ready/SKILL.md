@@ -51,11 +51,13 @@ Marking PR as ready for review...
 🎉 PR is now ready for human review!
 ```
 
-## Deleting Pure-Claude Threads
+## Deleting Pure-Claude Threads (Optional)
 
 When iterating with an LLM, you may end up with review threads where all comments are from Claude (e.g., Claude talking to itself during iterations). These can be noise for human reviewers.
 
-Use `--delete-claude-threads` to automatically delete these threads:
+**Do not use this option unless the user specifically requests it.**
+
+If requested, use `--delete-claude-threads` to automatically delete these threads:
 
 ```
 pr-loop ready --delete-claude-threads
