@@ -2,11 +2,12 @@
 // Blocks until PR state changes to something requiring action.
 
 use crate::checks::{CheckStatus, ChecksClient, ChecksSummary};
+use crate::git::GitClient;
 use crate::threads::{ThreadsClient, CLAUDE_MARKER};
 use anyhow::Result;
 use std::collections::HashSet;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 /// Snapshot of PR state for comparison.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,12 +16,24 @@ pub struct PrSnapshot {
     pub actionable_thread_ids: HashSet<String>,
     /// Names of failed CI checks
     pub failed_check_names: HashSet<String>,
+    /// Names of pending CI checks
+    pub pending_check_names: HashSet<String>,
 }
 
 impl PrSnapshot {
-    /// Returns true if the PR is currently actionable.
+    /// Returns true if the PR is currently actionable (needs work).
     pub fn is_actionable(&self) -> bool {
         !self.actionable_thread_ids.is_empty() || !self.failed_check_names.is_empty()
+    }
+
+    /// Returns true if CI is "happy" - all checks passed, none pending or failed.
+    pub fn is_ci_happy(&self) -> bool {
+        self.failed_check_names.is_empty() && self.pending_check_names.is_empty()
+    }
+
+    /// Returns true if the PR is "happy" - CI passing and no actionable comments.
+    pub fn is_happy(&self) -> bool {
+        self.is_ci_happy() && self.actionable_thread_ids.is_empty()
     }
 }
 
@@ -46,6 +59,13 @@ pub fn capture_snapshot(
         .map(|c| c.name.clone())
         .collect();
 
+    let pending_check_names: HashSet<String> = checks_summary
+        .checks
+        .iter()
+        .filter(|c| c.status == CheckStatus::Pending)
+        .map(|c| c.name.clone())
+        .collect();
+
     // Fetch threads
     let threads = threads_client
         .fetch_threads(owner, repo, pr_number)
@@ -68,15 +88,18 @@ pub fn capture_snapshot(
     Ok(PrSnapshot {
         actionable_thread_ids,
         failed_check_names,
+        pending_check_names,
     })
 }
 
-/// Result of waiting for actionable state.
+/// Result of waiting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WaitResult {
-    /// PR became actionable
+    /// PR became actionable (has work to do)
     Actionable,
-    /// Timeout reached without becoming actionable
+    /// PR is "happy" (CI passing, no comments needing response)
+    Happy,
+    /// Timeout reached
     Timeout,
 }
 
@@ -136,6 +159,74 @@ pub fn wait_until_actionable(
         if snapshot.is_actionable() {
             return Ok(WaitResult::Actionable);
         }
+    }
+}
+
+/// Wait until PR is actionable or "happy" (CI passing, no comments, min time since last push).
+/// Returns Happy when the PR is in a good state, Actionable if work is needed, or Timeout.
+pub fn wait_until_actionable_or_happy(
+    checks_client: &dyn ChecksClient,
+    threads_client: &dyn ThreadsClient,
+    git_client: &dyn GitClient,
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+    include_patterns: &[String],
+    exclude_patterns: &[String],
+    timeout_secs: u64,
+    poll_interval_secs: u64,
+    min_wait_after_push_secs: u64,
+) -> Result<WaitResult> {
+    let start = Instant::now();
+    let timeout = Duration::from_secs(timeout_secs);
+    let poll_interval = Duration::from_secs(poll_interval_secs);
+    let min_wait_after_push = Duration::from_secs(min_wait_after_push_secs);
+
+    eprintln!(
+        "Waiting for PR to become actionable or happy (timeout: {}s, polling every {}s)...",
+        timeout_secs, poll_interval_secs
+    );
+
+    loop {
+        if start.elapsed() >= timeout {
+            return Ok(WaitResult::Timeout);
+        }
+
+        let snapshot = capture_snapshot(
+            checks_client,
+            threads_client,
+            owner,
+            repo,
+            pr_number,
+            include_patterns,
+            exclude_patterns,
+        )?;
+
+        // If actionable (comments or failures), return immediately
+        if snapshot.is_actionable() {
+            return Ok(WaitResult::Actionable);
+        }
+
+        // Check if "happy": CI passing (no failures, no pending) and no comments
+        if snapshot.is_happy() {
+            // Also need to wait min time after last push to ensure CI has triggered
+            let last_commit_time = git_client.get_last_commit_time()?;
+            let elapsed_since_commit = SystemTime::now()
+                .duration_since(last_commit_time)
+                .unwrap_or(Duration::ZERO);
+
+            if elapsed_since_commit >= min_wait_after_push {
+                return Ok(WaitResult::Happy);
+            } else {
+                let remaining = min_wait_after_push - elapsed_since_commit;
+                eprintln!(
+                    "PR looks happy but waiting {}s more to ensure CI has triggered...",
+                    remaining.as_secs()
+                );
+            }
+        }
+
+        thread::sleep(poll_interval);
     }
 }
 
@@ -325,5 +416,73 @@ mod tests {
         .unwrap();
 
         assert!(!snapshot.is_actionable());
+    }
+
+    #[test]
+    fn snapshot_is_ci_happy_all_passing() {
+        let snapshot = PrSnapshot {
+            actionable_thread_ids: HashSet::new(),
+            failed_check_names: HashSet::new(),
+            pending_check_names: HashSet::new(),
+        };
+        assert!(snapshot.is_ci_happy());
+    }
+
+    #[test]
+    fn snapshot_is_ci_happy_with_pending() {
+        let mut pending = HashSet::new();
+        pending.insert("build".to_string());
+        let snapshot = PrSnapshot {
+            actionable_thread_ids: HashSet::new(),
+            failed_check_names: HashSet::new(),
+            pending_check_names: pending,
+        };
+        assert!(!snapshot.is_ci_happy());
+    }
+
+    #[test]
+    fn snapshot_is_ci_happy_with_failures() {
+        let mut failed = HashSet::new();
+        failed.insert("test".to_string());
+        let snapshot = PrSnapshot {
+            actionable_thread_ids: HashSet::new(),
+            failed_check_names: failed,
+            pending_check_names: HashSet::new(),
+        };
+        assert!(!snapshot.is_ci_happy());
+    }
+
+    #[test]
+    fn snapshot_is_happy_no_comments_ci_passing() {
+        let snapshot = PrSnapshot {
+            actionable_thread_ids: HashSet::new(),
+            failed_check_names: HashSet::new(),
+            pending_check_names: HashSet::new(),
+        };
+        assert!(snapshot.is_happy());
+    }
+
+    #[test]
+    fn snapshot_is_happy_with_comments() {
+        let mut threads = HashSet::new();
+        threads.insert("T1".to_string());
+        let snapshot = PrSnapshot {
+            actionable_thread_ids: threads,
+            failed_check_names: HashSet::new(),
+            pending_check_names: HashSet::new(),
+        };
+        assert!(!snapshot.is_happy());
+    }
+
+    #[test]
+    fn snapshot_is_happy_with_pending_ci() {
+        let mut pending = HashSet::new();
+        pending.insert("build".to_string());
+        let snapshot = PrSnapshot {
+            actionable_thread_ids: HashSet::new(),
+            failed_check_names: HashSet::new(),
+            pending_check_names: pending,
+        };
+        assert!(!snapshot.is_happy());
     }
 }

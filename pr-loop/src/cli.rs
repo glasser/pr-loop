@@ -25,16 +25,25 @@ pub struct Cli {
     pub exclude_checks: Vec<String>,
 
     /// Wait until the PR becomes actionable (has comments needing response or CI failures)
-    #[arg(long)]
+    #[arg(long, conflicts_with = "wait_until_actionable_or_happy")]
     pub wait_until_actionable: bool,
 
-    /// Timeout in seconds for --wait-until-actionable (default: 1800 = 30 minutes)
+    /// Wait until PR is "happy" (CI passing, no comments) or actionable. Exits successfully
+    /// when CI passes with no unaddressed comments (after waiting for CI to trigger).
+    #[arg(long, conflicts_with = "wait_until_actionable")]
+    pub wait_until_actionable_or_happy: bool,
+
+    /// Timeout in seconds for wait modes (default: 1800 = 30 minutes)
     #[arg(long, default_value = "1800")]
     pub timeout: u64,
 
-    /// Polling interval in seconds for --wait-until-actionable (default: 5)
+    /// Polling interval in seconds for wait modes (default: 5)
     #[arg(long, default_value = "5")]
     pub poll_interval: u64,
+
+    /// Minimum seconds to wait after last push before considering PR "happy" (default: 30)
+    #[arg(long, default_value = "30")]
+    pub min_wait_after_push: u64,
 
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -230,5 +239,25 @@ mod tests {
         assert!(cli.wait_until_actionable);
         assert_eq!(cli.timeout, 600);
         assert_eq!(cli.poll_interval, 10);
+    }
+
+    #[test]
+    fn parse_wait_until_actionable_or_happy() {
+        let cli = Cli::parse_from(["pr-loop", "--wait-until-actionable-or-happy"]);
+        assert!(cli.wait_until_actionable_or_happy);
+        assert!(!cli.wait_until_actionable);
+        assert_eq!(cli.min_wait_after_push, 30); // default 30 seconds
+    }
+
+    #[test]
+    fn parse_wait_until_actionable_or_happy_with_min_wait() {
+        let cli = Cli::parse_from([
+            "pr-loop",
+            "--wait-until-actionable-or-happy",
+            "--min-wait-after-push",
+            "60",
+        ]);
+        assert!(cli.wait_until_actionable_or_happy);
+        assert_eq!(cli.min_wait_after_push, 60);
     }
 }

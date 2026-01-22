@@ -6,6 +6,7 @@ mod checks;
 mod circleci;
 mod cli;
 mod credentials;
+mod git;
 mod github;
 mod reply;
 mod threads;
@@ -19,10 +20,11 @@ use circleci::{
 use clap::Parser;
 use cli::{Cli, Command};
 use credentials::{CredentialProvider, Credentials, RealCredentialProvider};
+use git::RealGitClient;
 use github::{resolve_pr_context, RealGitHubClient};
 use reply::{format_claude_message, RealReplyClient, ReplyClient};
 use threads::{RealThreadsClient, ThreadsClient, CLAUDE_MARKER};
-use wait::{wait_until_actionable, WaitResult};
+use wait::{wait_until_actionable, wait_until_actionable_or_happy, WaitResult};
 
 fn main() {
     let cli = Cli::parse();
@@ -86,6 +88,7 @@ fn main() {
         None => {
             let checks_client = RealChecksClient;
             let threads_client = RealThreadsClient;
+            let git_client = RealGitClient;
 
             // If --wait-until-actionable, poll until something needs attention
             if cli.wait_until_actionable {
@@ -103,8 +106,45 @@ fn main() {
                     Ok(WaitResult::Actionable) => {
                         eprintln!("PR is now actionable.");
                     }
+                    Ok(WaitResult::Happy) => {
+                        // Should not happen with wait_until_actionable
+                        eprintln!("PR is happy.");
+                    }
                     Ok(WaitResult::Timeout) => {
                         eprintln!("Timeout reached without PR becoming actionable.");
+                        std::process::exit(2);
+                    }
+                    Err(e) => {
+                        eprintln!("Error while waiting: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+
+            // If --wait-until-actionable-or-happy, poll until actionable or happy
+            if cli.wait_until_actionable_or_happy {
+                match wait_until_actionable_or_happy(
+                    &checks_client,
+                    &threads_client,
+                    &git_client,
+                    &pr_context.owner,
+                    &pr_context.repo,
+                    pr_context.pr_number,
+                    &cli.include_checks,
+                    &cli.exclude_checks,
+                    cli.timeout,
+                    cli.poll_interval,
+                    cli.min_wait_after_push,
+                ) {
+                    Ok(WaitResult::Actionable) => {
+                        eprintln!("PR is now actionable.");
+                    }
+                    Ok(WaitResult::Happy) => {
+                        eprintln!("PR is happy (CI passing, no comments).");
+                        std::process::exit(0);
+                    }
+                    Ok(WaitResult::Timeout) => {
+                        eprintln!("Timeout reached.");
                         std::process::exit(2);
                     }
                     Err(e) => {
