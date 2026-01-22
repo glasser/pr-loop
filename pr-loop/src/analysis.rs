@@ -71,16 +71,13 @@ mod tests {
             name: name.to_string(),
             status,
             url: None,
-            description: None,
         }
     }
 
     fn make_comment(author: &str, body: &str) -> ThreadComment {
         ThreadComment {
-            id: format!("C_{}", author),
             author: author.to_string(),
             body: body.to_string(),
-            created_at: "2026-01-21T00:00:00Z".to_string(),
         }
     }
 

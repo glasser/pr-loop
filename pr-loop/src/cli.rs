@@ -32,8 +32,8 @@ pub struct Cli {
     #[arg(long, default_value = "1800")]
     pub timeout: u64,
 
-    /// Polling interval in seconds for --wait-until-actionable (default: 30)
-    #[arg(long, default_value = "30")]
+    /// Polling interval in seconds for --wait-until-actionable (default: 5)
+    #[arg(long, default_value = "5")]
     pub poll_interval: u64,
 
     #[command(subcommand)]
@@ -62,6 +62,7 @@ pub enum Command {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+    use serial_test::serial;
 
     #[test]
     fn verify_cli() {
@@ -70,7 +71,15 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn parse_no_args() {
+        // Clear env vars to ensure clean state
+        // SAFETY: Test is serialized via #[serial]
+        unsafe {
+            std::env::remove_var("PR_LOOP_INCLUDE_CHECKS");
+            std::env::remove_var("PR_LOOP_EXCLUDE_CHECKS");
+        }
+
         let cli = Cli::parse_from(["pr-loop"]);
         assert!(cli.repo.is_none());
         assert!(cli.pr.is_none());
@@ -164,9 +173,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn parse_check_filters_from_env() {
-        // Test that env vars work with comma-separated values
-        // SAFETY: Test runs single-threaded; no other code accesses these env vars concurrently
+        // SAFETY: Test is serialized via #[serial]
         unsafe {
             std::env::set_var("PR_LOOP_INCLUDE_CHECKS", "ci/*,build");
             std::env::set_var("PR_LOOP_EXCLUDE_CHECKS", "lint,codecov/*");
@@ -177,7 +186,6 @@ mod tests {
         assert_eq!(cli.exclude_checks, vec!["lint", "codecov/*"]);
 
         // Clean up
-        // SAFETY: Test runs single-threaded
         unsafe {
             std::env::remove_var("PR_LOOP_INCLUDE_CHECKS");
             std::env::remove_var("PR_LOOP_EXCLUDE_CHECKS");
@@ -185,9 +193,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn cli_args_override_env() {
-        // Test that CLI args take precedence over env vars
-        // SAFETY: Test runs single-threaded; no other code accesses these env vars concurrently
+        // SAFETY: Test is serialized via #[serial]
         unsafe {
             std::env::set_var("PR_LOOP_INCLUDE_CHECKS", "from-env");
         }
@@ -196,7 +204,6 @@ mod tests {
         assert_eq!(cli.include_checks, vec!["from-cli"]);
 
         // Clean up
-        // SAFETY: Test runs single-threaded
         unsafe {
             std::env::remove_var("PR_LOOP_INCLUDE_CHECKS");
         }
@@ -207,7 +214,7 @@ mod tests {
         let cli = Cli::parse_from(["pr-loop", "--wait-until-actionable"]);
         assert!(cli.wait_until_actionable);
         assert_eq!(cli.timeout, 1800); // default 30 minutes
-        assert_eq!(cli.poll_interval, 30); // default 30 seconds
+        assert_eq!(cli.poll_interval, 5); // default 5 seconds
     }
 
     #[test]

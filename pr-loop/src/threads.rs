@@ -8,10 +8,8 @@ use std::process::Command;
 /// A comment in a review thread.
 #[derive(Debug, Clone)]
 pub struct ThreadComment {
-    pub id: String,
     pub author: String,
     pub body: String,
-    pub created_at: String,
 }
 
 /// A review thread on a PR.
@@ -145,11 +143,8 @@ struct CommentsConnection {
 
 #[derive(Deserialize)]
 struct CommentNode {
-    id: String,
     author: Option<AuthorNode>,
     body: String,
-    #[serde(rename = "createdAt")]
-    created_at: String,
 }
 
 #[derive(Deserialize)]
@@ -175,12 +170,10 @@ fn fetch_threads_from_graphql(
                             line
                             comments(first: 100) {
                                 nodes {
-                                    id
                                     author {
                                         login
                                     }
                                     body
-                                    createdAt
                                 }
                             }
                         }
@@ -238,10 +231,8 @@ fn fetch_threads_from_graphql(
                 .nodes
                 .into_iter()
                 .map(|c| ThreadComment {
-                    id: c.id,
                     author: c.author.map(|a| a.login).unwrap_or_else(|| "ghost".to_string()),
                     body: c.body,
-                    created_at: c.created_at,
                 })
                 .collect(),
         })
@@ -270,10 +261,8 @@ mod tests {
 
     fn make_comment(author: &str, body: &str) -> ThreadComment {
         ThreadComment {
-            id: format!("C_{}", author),
             author: author.to_string(),
             body: body.to_string(),
-            created_at: "2026-01-21T00:00:00Z".to_string(),
         }
     }
 

@@ -35,7 +35,6 @@ pub struct Check {
     pub name: String,
     pub status: CheckStatus,
     pub url: Option<String>,
-    pub description: Option<String>,
 }
 
 /// Summary of all checks for a PR.
@@ -61,22 +60,6 @@ impl ChecksSummary {
             .collect()
     }
 
-    /// Returns true if all checks have passed.
-    pub fn all_passed(&self) -> bool {
-        self.checks.iter().all(|c| {
-            matches!(
-                c.status,
-                CheckStatus::Pass | CheckStatus::Skipping | CheckStatus::Cancelled
-            )
-        })
-    }
-
-    /// Returns true if any checks are still pending.
-    pub fn has_pending(&self) -> bool {
-        self.checks
-            .iter()
-            .any(|c| c.status == CheckStatus::Pending)
-    }
 }
 
 /// Trait for fetching checks, allowing test implementations.
@@ -98,7 +81,6 @@ struct GhCheck {
     name: String,
     bucket: String,
     link: Option<String>,
-    description: Option<String>,
 }
 
 /// Fetch checks using `gh pr checks --json`.
@@ -130,7 +112,6 @@ fn fetch_checks_from_gh(owner: &str, repo: &str, pr_number: u64) -> Result<Vec<C
             name: c.name,
             status: CheckStatus::from_bucket(&c.bucket),
             url: c.link,
-            description: c.description,
         })
         .collect())
 }
@@ -204,7 +185,6 @@ mod tests {
             name: name.to_string(),
             status,
             url: Some(format!("https://example.com/{}", name)),
-            description: None,
         }
     }
 
@@ -226,9 +206,8 @@ mod tests {
                 make_check("ci/test", CheckStatus::Pass),
             ],
         };
-        assert!(summary.all_passed());
-        assert!(!summary.has_pending());
         assert!(summary.failed().is_empty());
+        assert!(summary.pending().is_empty());
     }
 
     #[test]
@@ -239,7 +218,6 @@ mod tests {
                 make_check("ci/test", CheckStatus::Fail),
             ],
         };
-        assert!(!summary.all_passed());
         assert_eq!(summary.failed().len(), 1);
         assert_eq!(summary.failed()[0].name, "ci/test");
     }
@@ -252,8 +230,6 @@ mod tests {
                 make_check("ci/test", CheckStatus::Pending),
             ],
         };
-        assert!(!summary.all_passed());
-        assert!(summary.has_pending());
         assert_eq!(summary.pending().len(), 1);
     }
 

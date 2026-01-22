@@ -170,7 +170,6 @@ mod tests {
             name: name.to_string(),
             status,
             url: None,
-            description: None,
         }
     }
 
@@ -181,10 +180,8 @@ mod tests {
             path: Some("test.rs".to_string()),
             line: Some(1),
             comments: vec![ThreadComment {
-                id: "C1".to_string(),
                 author: "reviewer".to_string(),
                 body: last_comment_body.to_string(),
-                created_at: "2026-01-21T00:00:00Z".to_string(),
             }],
         }
     }

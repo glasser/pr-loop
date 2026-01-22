@@ -13,12 +13,6 @@ pub struct PrContext {
     pub pr_number: u64,
 }
 
-impl PrContext {
-    /// Returns the repo in "owner/repo" format.
-    pub fn repo_full_name(&self) -> String {
-        format!("{}/{}", self.owner, self.repo)
-    }
-}
 
 /// Trait for GitHub operations, allowing test implementations.
 pub trait GitHubClient {
@@ -210,13 +204,4 @@ mod tests {
         assert_eq!(ctx.pr_number, 999);
     }
 
-    #[test]
-    fn pr_context_full_name() {
-        let ctx = PrContext {
-            owner: "foo".to_string(),
-            repo: "bar".to_string(),
-            pr_number: 1,
-        };
-        assert_eq!(ctx.repo_full_name(), "foo/bar");
-    }
 }

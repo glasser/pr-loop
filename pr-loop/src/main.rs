@@ -3,6 +3,7 @@
 
 mod analysis;
 mod checks;
+mod circleci;
 mod cli;
 mod credentials;
 mod github;
@@ -12,9 +13,12 @@ mod wait;
 
 use analysis::{analyze_pr, NextAction};
 use checks::{get_checks_summary, ChecksSummary, RealChecksClient};
+use circleci::{
+    get_failed_step_logs, is_circleci_url, parse_circleci_url, FailedStepLog, RealCircleCiClient,
+};
 use clap::Parser;
 use cli::{Cli, Command};
-use credentials::{CredentialProvider, RealCredentialProvider};
+use credentials::{CredentialProvider, Credentials, RealCredentialProvider};
 use github::{resolve_pr_context, RealGitHubClient};
 use reply::{format_claude_message, RealReplyClient, ReplyClient};
 use threads::{RealThreadsClient, ThreadsClient, CLAUDE_MARKER};
@@ -142,15 +146,55 @@ fn main() {
 
             // Analyze and output recommendation
             let action = analyze_pr(&checks_summary, threads);
-            print_recommendation(&pr_context, &checks_summary, &action);
+
+            // If there are CI failures and we have a CircleCI token, fetch logs
+            let circleci_logs = if creds.circleci_token.is_some() {
+                fetch_circleci_logs(&creds, &checks_summary)
+            } else {
+                vec![]
+            };
+
+            print_recommendation(&pr_context, &checks_summary, &action, &circleci_logs);
         }
     }
+}
+
+/// Fetch CircleCI logs for failed checks that have CircleCI URLs.
+fn fetch_circleci_logs(creds: &Credentials, checks: &ChecksSummary) -> Vec<FailedStepLog> {
+    let token = match &creds.circleci_token {
+        Some(t) => t,
+        None => return vec![],
+    };
+
+    let client = RealCircleCiClient::new(token.clone());
+    let mut all_logs = Vec::new();
+
+    for check in checks.failed() {
+        if let Some(url) = &check.url {
+            if is_circleci_url(url) {
+                if let Some(job_info) = parse_circleci_url(url) {
+                    match get_failed_step_logs(&client, &job_info) {
+                        Ok(logs) => all_logs.extend(logs),
+                        Err(e) => {
+                            eprintln!(
+                                "Warning: Failed to fetch CircleCI logs for {}: {}",
+                                check.name, e
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    all_logs
 }
 
 fn print_recommendation(
     pr_context: &github::PrContext,
     checks: &ChecksSummary,
     action: &NextAction,
+    circleci_logs: &[FailedStepLog],
 ) {
     println!(
         "# PR Analysis: {}/{}#{}",
@@ -222,12 +266,43 @@ fn print_recommendation(
             for name in failed_check_names {
                 println!("  ✗ {}", name);
             }
-            println!();
-            println!("Use the CircleCI MCP server to investigate the failures:");
-            println!("  - List recent pipelines for this project");
-            println!("  - Get job details and logs for the failed workflow");
-            println!();
-            println!("Then push fixes to resolve the issues.");
+
+            // Show CircleCI logs if available
+            if !circleci_logs.is_empty() {
+                println!();
+                println!("## CI Failure Details");
+                for log in circleci_logs {
+                    println!();
+                    println!("### Job: {} / Step: {}", log.job_name, log.step_name);
+                    if !log.error.is_empty() {
+                        println!();
+                        println!("**Stderr:**");
+                        println!("```");
+                        // Truncate long output
+                        let error_truncated = truncate_log(&log.error, 2000);
+                        println!("{}", error_truncated);
+                        println!("```");
+                    }
+                    if !log.output.is_empty() {
+                        println!();
+                        println!("**Stdout (last lines):**");
+                        println!("```");
+                        // Show last part of stdout (often contains the actual error)
+                        let output_truncated = truncate_log_tail(&log.output, 2000);
+                        println!("{}", output_truncated);
+                        println!("```");
+                    }
+                }
+                println!();
+                println!("Analyze the errors above and push fixes to resolve them.");
+            } else {
+                println!();
+                println!("Use the CircleCI MCP server to investigate the failures:");
+                println!("  - List recent pipelines for this project");
+                println!("  - Get job details and logs for the failed workflow");
+                println!();
+                println!("Then push fixes to resolve the issues.");
+            }
         }
 
         NextAction::WaitForCi { pending_check_names } => {
@@ -253,5 +328,26 @@ fn print_recommendation(
             println!();
             println!("The PR is ready for merge or further review.");
         }
+    }
+}
+
+/// Truncate a log string to a maximum length, from the beginning.
+fn truncate_log(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}...\n[truncated, {} more bytes]", &s[..max_len], s.len() - max_len)
+    }
+}
+
+/// Truncate a log string to show only the tail (last lines).
+fn truncate_log_tail(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        let start = s.len() - max_len;
+        // Find the next newline to start on a line boundary
+        let start = s[start..].find('\n').map(|i| start + i + 1).unwrap_or(start);
+        format!("[... {} bytes truncated]\n{}", start, &s[start..])
     }
 }
