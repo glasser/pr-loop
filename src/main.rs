@@ -87,11 +87,7 @@ fn main() {
     }
 
     match cli.command {
-        Some(Command::Reply {
-            thread,
-            message,
-            resolve,
-        }) => {
+        Some(Command::Reply { thread, message }) => {
             let reply_client = RealReplyClient;
             let formatted_message = format_claude_message(&message);
 
@@ -103,13 +99,6 @@ fn main() {
             match reply_client.post_reply(&thread, &formatted_message) {
                 Ok(result) => {
                     println!("✓ Reply posted (comment ID: {})", result.comment_id);
-
-                    if resolve {
-                        match reply_client.resolve_thread(&thread) {
-                            Ok(()) => println!("✓ Thread resolved"),
-                            Err(e) => eprintln!("Warning: Failed to resolve thread: {}", e),
-                        }
-                    }
                 }
                 Err(e) => {
                     eprintln!("Error: Failed to post reply: {}", e);
@@ -118,13 +107,13 @@ fn main() {
             }
         }
 
-        Some(Command::Ready { delete_claude_threads }) => {
+        Some(Command::Ready { preserve_claude_threads }) => {
             run_ready_command(
                 &pr_client,
                 &pr_context,
                 &cli.include_checks,
                 &cli.exclude_checks,
-                delete_claude_threads,
+                preserve_claude_threads,
             );
         }
 
@@ -454,7 +443,7 @@ fn run_ready_command(
     pr_context: &PrContext,
     include_checks: &[String],
     exclude_checks: &[String],
-    delete_claude_threads: bool,
+    preserve_claude_threads: bool,
 ) {
     let checks_client = RealChecksClient;
     let threads_client = RealThreadsClient;
@@ -490,6 +479,12 @@ fn run_ready_command(
             eprintln!();
             eprintln!("Or to squash all commits on this branch:");
             eprintln!("  git reset --soft $(git merge-base HEAD main) && git commit");
+            eprintln!();
+            eprintln!("When writing the squashed commit message:");
+            eprintln!("  - Describe the full change as a single cohesive commit");
+            eprintln!("  - Summarize what the PR accomplishes, not the individual commits");
+            eprintln!("  - After squashing, update the PR description to match (keep any status blocks");
+            eprintln!("    and follow any PR template in the repo)");
             std::process::exit(1);
         }
         Err(e) => {
@@ -547,8 +542,8 @@ fn run_ready_command(
     println!("✓ All threads resolved");
     println!("✓ All CI checks passed");
 
-    // Step 4: Optionally delete pure-Claude threads
-    if delete_claude_threads {
+    // Step 4: Delete pure-Claude threads unless preservation is requested
+    if !preserve_claude_threads {
         println!("Deleting pure-Claude threads...");
         match threads_client.fetch_threads(&pr_context.owner, &pr_context.repo, pr_context.pr_number) {
             Ok(threads) => {

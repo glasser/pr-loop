@@ -70,20 +70,16 @@ pub enum Command {
         /// The message to post (will be prefixed with "🤖 From Claude:")
         #[arg(long)]
         message: String,
-
-        /// Also resolve the thread after replying
-        #[arg(long)]
-        resolve: bool,
     },
 
     /// Mark the PR as ready for review.
     /// Validates the PR is happy (CI passing, no unresolved threads), removes the status block,
     /// and marks the PR as non-draft.
     Ready {
-        /// Delete review threads where all comments are from Claude (resolved threads only).
-        /// These are typically noise from the LLM iteration process.
+        /// Preserve review threads where all comments are from Claude (resolved threads only).
+        /// By default, these are deleted as they are typically noise from the LLM iteration process.
         #[arg(long)]
-        delete_claude_threads: bool,
+        preserve_claude_threads: bool,
     },
 }
 
@@ -150,33 +146,9 @@ mod tests {
             "Fixed the issue",
         ]);
         match cli.command {
-            Some(Command::Reply {
-                thread,
-                message,
-                resolve,
-            }) => {
+            Some(Command::Reply { thread, message }) => {
                 assert_eq!(thread, "PRRT_123");
                 assert_eq!(message, "Fixed the issue");
-                assert!(!resolve);
-            }
-            _ => panic!("Expected Reply command"),
-        }
-    }
-
-    #[test]
-    fn parse_reply_with_resolve() {
-        let cli = Cli::parse_from([
-            "pr-loop",
-            "reply",
-            "--thread",
-            "PRRT_123",
-            "--message",
-            "Done",
-            "--resolve",
-        ]);
-        match cli.command {
-            Some(Command::Reply { resolve, .. }) => {
-                assert!(resolve);
             }
             _ => panic!("Expected Reply command"),
         }
@@ -307,8 +279,8 @@ mod tests {
     fn parse_ready_command() {
         let cli = Cli::parse_from(["pr-loop", "ready"]);
         match cli.command {
-            Some(Command::Ready { delete_claude_threads }) => {
-                assert!(!delete_claude_threads);
+            Some(Command::Ready { preserve_claude_threads }) => {
+                assert!(!preserve_claude_threads);
             }
             _ => panic!("Expected Ready command"),
         }
@@ -320,19 +292,19 @@ mod tests {
         assert_eq!(cli.repo, Some("owner/repo".to_string()));
         assert_eq!(cli.pr, Some(123));
         match cli.command {
-            Some(Command::Ready { delete_claude_threads }) => {
-                assert!(!delete_claude_threads);
+            Some(Command::Ready { preserve_claude_threads }) => {
+                assert!(!preserve_claude_threads);
             }
             _ => panic!("Expected Ready command"),
         }
     }
 
     #[test]
-    fn parse_ready_command_with_delete_claude_threads() {
-        let cli = Cli::parse_from(["pr-loop", "ready", "--delete-claude-threads"]);
+    fn parse_ready_command_with_preserve_claude_threads() {
+        let cli = Cli::parse_from(["pr-loop", "ready", "--preserve-claude-threads"]);
         match cli.command {
-            Some(Command::Ready { delete_claude_threads }) => {
-                assert!(delete_claude_threads);
+            Some(Command::Ready { preserve_claude_threads }) => {
+                assert!(preserve_claude_threads);
             }
             _ => panic!("Expected Ready command"),
         }

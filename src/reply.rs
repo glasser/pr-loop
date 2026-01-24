@@ -15,7 +15,6 @@ pub struct ReplyResult {
 /// Trait for posting replies, allowing test implementations.
 pub trait ReplyClient {
     fn post_reply(&self, thread_id: &str, body: &str) -> Result<ReplyResult>;
-    fn resolve_thread(&self, thread_id: &str) -> Result<()>;
     fn delete_comment(&self, comment_id: &str) -> Result<()>;
 }
 
@@ -25,10 +24,6 @@ pub struct RealReplyClient;
 impl ReplyClient for RealReplyClient {
     fn post_reply(&self, thread_id: &str, body: &str) -> Result<ReplyResult> {
         post_reply_graphql(thread_id, body)
-    }
-
-    fn resolve_thread(&self, thread_id: &str) -> Result<()> {
-        resolve_thread_graphql(thread_id)
     }
 
     fn delete_comment(&self, comment_id: &str) -> Result<()> {
@@ -62,23 +57,6 @@ struct AddReplyPayload {
 #[derive(Deserialize)]
 struct CommentNode {
     id: String,
-}
-
-#[derive(Deserialize)]
-struct ResolveData {
-    #[serde(rename = "resolveReviewThread")]
-    resolve_thread: Option<ResolvePayload>,
-}
-
-#[derive(Deserialize)]
-struct ResolvePayload {
-    thread: Option<ThreadNode>,
-}
-
-#[derive(Deserialize)]
-struct ThreadNode {
-    #[serde(rename = "isResolved")]
-    is_resolved: bool,
 }
 
 /// Post a reply to a thread using GraphQL.
@@ -166,59 +144,6 @@ fn delete_comment_graphql(comment_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Resolve a thread using GraphQL.
-fn resolve_thread_graphql(thread_id: &str) -> Result<()> {
-    let mutation = r#"
-        mutation($threadId: ID!) {
-            resolveReviewThread(input: {
-                threadId: $threadId
-            }) {
-                thread {
-                    isResolved
-                }
-            }
-        }
-    "#;
-
-    let output = Command::new("gh")
-        .args([
-            "api",
-            "graphql",
-            "-f",
-            &format!("query={}", mutation),
-            "-f",
-            &format!("threadId={}", thread_id),
-        ])
-        .output()
-        .context("Failed to run 'gh api graphql' for resolve")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("GraphQL mutation failed: {}", stderr.trim());
-    }
-
-    let response: GraphQLResponse<ResolveData> = serde_json::from_slice(&output.stdout)
-        .context("Failed to parse GraphQL response")?;
-
-    if let Some(errors) = response.errors {
-        let messages: Vec<_> = errors.iter().map(|e| e.message.as_str()).collect();
-        anyhow::bail!("GraphQL errors: {}", messages.join(", "));
-    }
-
-    let is_resolved = response
-        .data
-        .and_then(|d| d.resolve_thread)
-        .and_then(|r| r.thread)
-        .map(|t| t.is_resolved)
-        .unwrap_or(false);
-
-    if !is_resolved {
-        anyhow::bail!("Thread was not resolved");
-    }
-
-    Ok(())
-}
-
 /// Format the message with the Claude marker prefix.
 pub fn format_claude_message(message: &str) -> String {
     format!("{} {}", CLAUDE_MARKER, message)
@@ -241,14 +166,6 @@ mod tests {
                 Ok(ReplyResult {
                     comment_id: "test_comment_id".to_string(),
                 })
-            }
-        }
-
-        fn resolve_thread(&self, _thread_id: &str) -> Result<()> {
-            if self.should_fail {
-                anyhow::bail!("Test failure")
-            } else {
-                Ok(())
             }
         }
 

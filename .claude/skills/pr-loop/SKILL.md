@@ -12,7 +12,7 @@ Run the pr-loop tool in attended mode, responding to review comments and CI fail
 
 1. Run `pr-loop --wait-until-actionable --maintain-status` to wait for the PR to need attention
 2. When the tool returns, read its output carefully:
-   - If there are **review comments needing response**, pick one to address - make the requested changes and reply to the thread using `pr-loop reply --thread <id> --message "<response>" --resolve`
+   - If there are **review comments needing response**, pick one to address - make the requested changes and reply to the thread using `pr-loop reply --thread <id> --message "<response>"`
    - If there are **CI failures**, investigate and fix them
 3. Commit your changes (as a new commit, not amending) and push
 4. Return to step 1 and wait for the next actionable state

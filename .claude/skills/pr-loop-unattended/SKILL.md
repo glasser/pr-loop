@@ -1,7 +1,6 @@
 ---
 name: pr-loop-unattended
 description: Monitor a PR and respond to comments/CI failures until the PR is happy (CI passing, no comments)
-disable-model-invocation: true
 ---
 
 # PR Loop - Unattended Mode
@@ -15,7 +14,7 @@ Run the pr-loop tool in unattended mode, responding to review comments and CI fa
    - If the PR is **happy** (CI passing, no comments), you're done! Report success to the user.
    - If the PR is **actionable**, continue to step 3
 3. Read the tool output and address one issue:
-   - If there are **review comments needing response**, pick one to address - make the requested changes and reply to the thread using `pr-loop reply --thread <id> --message "<response>" --resolve`
+   - If there are **review comments needing response**, pick one to address - make the requested changes and reply to the thread using `pr-loop reply --thread <id> --message "<response>"`
    - If there are **CI failures**, investigate and fix them
 4. Commit your changes (as a new commit, not amending) and push
 5. Return to step 1

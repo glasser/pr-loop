@@ -2,6 +2,7 @@
 name: pr-ready
 description: Mark a draft PR as ready for review after validating it's in a good state
 disable-model-invocation: true
+argument-hint: "[preserve]"
 ---
 
 # PR Ready
@@ -10,15 +11,16 @@ Mark a draft PR as ready for human review. This validates the PR is in a good st
 
 ## Instructions
 
-Run `pr-loop ready` to (add `--delete-claude-threads` if user passed "delete" as an argument to this skill):
+Run `pr-loop ready` to (add `--preserve-claude-threads` if user passed "preserve" as an argument to this skill):
 
 1. Verify the PR is currently in draft mode
 2. Verify the PR has exactly one commit (fail with squash instructions if not)
 3. Validate that:
    - All CI checks are passing (no failures or pending)
    - All review threads are resolved (not just responded to)
-4. Remove the LLM iteration status block from the PR description
-5. Mark the PR as ready for review (non-draft)
+4. Delete resolved review threads where all comments are from Claude (unless `--preserve-claude-threads` is passed)
+5. Remove the LLM iteration status block from the PR description
+6. Mark the PR as ready for review (non-draft)
 
 ## When to Use
 
@@ -51,13 +53,19 @@ Marking PR as ready for review...
 🎉 PR is now ready for human review!
 ```
 
-## Deleting Pure-Claude Threads (Optional)
+## Preserving Pure-Claude Threads (Optional)
 
-When iterating with an LLM, you may end up with review threads where all comments are from Claude (e.g., Claude talking to itself during iterations). These can be noise for human reviewers.
+When iterating with an LLM, you may end up with review threads where all comments are from Claude (e.g., Claude talking to itself during iterations). These are typically noise for human reviewers, so by default they are deleted.
 
-**Do not use this option unless the user specifically requests it** (e.g., `/pr-ready delete`).
+**If the user specifically requests preservation** (e.g., `/pr-ready preserve`), pass `--preserve-claude-threads` to keep these threads.
 
-This will delete all comments in resolved threads where every comment starts with the Claude marker. Threads with any non-Claude comments are preserved.
+By default, all comments in resolved threads where every comment starts with the Claude marker will be deleted. Threads with any non-Claude comments are always preserved.
+
+## If CI Is Still Pending
+
+If `pr-loop ready` fails because CI checks are still pending, use `/pr-loop-unattended` to wait for CI to complete. That skill has built-in waiting functionality that polls for CI status. Once CI passes, run `pr-loop ready` again.
+
+Do NOT use `sleep` to wait for CI - always use `/pr-loop-unattended` which handles the waiting properly.
 
 ## Important Notes
 

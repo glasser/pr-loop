@@ -46,11 +46,27 @@ impl ReviewThread {
         }
     }
 
-    /// Returns true if all comments in this thread are from Claude.
+    /// Returns true if this thread is "pure Claude" - meaning every comment is either:
+    /// - A Claude-marked comment, OR
+    /// - From an author who has also posted a Claude-marked comment in this thread
     /// Empty threads are not considered "pure Claude".
     pub fn is_pure_claude(&self) -> bool {
-        !self.comments.is_empty()
-            && self.comments.iter().all(|c| c.body.starts_with(CLAUDE_MARKER))
+        if self.comments.is_empty() {
+            return false;
+        }
+
+        // Find all authors who have posted Claude-marked comments
+        let claude_authors: std::collections::HashSet<&str> = self
+            .comments
+            .iter()
+            .filter(|c| c.body.starts_with(CLAUDE_MARKER))
+            .map(|c| c.author.as_str())
+            .collect();
+
+        // Thread is pure-Claude if every comment is either Claude-marked OR from a Claude author
+        self.comments.iter().all(|c| {
+            c.body.starts_with(CLAUDE_MARKER) || claude_authors.contains(c.author.as_str())
+        })
     }
 
     /// Returns the IDs of all comments in this thread.
@@ -435,7 +451,24 @@ mod tests {
     }
 
     #[test]
-    fn is_pure_claude_mixed_comments() {
+    fn is_pure_claude_same_author_claude_and_non_claude() {
+        // Same author posts both a regular comment and a Claude-marked comment
+        // This IS pure-Claude because the author has posted Claude comments
+        let thread = make_thread(
+            "T1",
+            true,
+            vec![
+                make_comment("glasser", "Please fix this"),
+                make_comment("glasser", "🤖 From Claude: Fixed!"),
+            ],
+        );
+        assert!(thread.is_pure_claude());
+    }
+
+    #[test]
+    fn is_pure_claude_different_authors_one_without_claude() {
+        // Different authors: reviewer has no Claude comments, claude-bot does
+        // NOT pure-Claude because reviewer never posted Claude comments
         let thread = make_thread(
             "T1",
             true,
