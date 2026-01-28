@@ -474,11 +474,14 @@ fn run_ready_command(
         Ok(count) => {
             eprintln!("Error: PR has {} commits. Please squash to a single commit before marking ready.", count);
             eprintln!();
+            eprintln!("First, fetch the latest from origin:");
+            eprintln!("  git fetch origin");
+            eprintln!();
             eprintln!("To squash commits interactively:");
-            eprintln!("  git rebase -i HEAD~{}", count);
+            eprintln!("  git rebase -i origin/main");
             eprintln!();
             eprintln!("Or to squash all commits on this branch:");
-            eprintln!("  git reset --soft $(git merge-base HEAD main) && git commit");
+            eprintln!("  git reset --soft $(git merge-base HEAD origin/main) && git commit");
             eprintln!();
             eprintln!("When writing the squashed commit message:");
             eprintln!("  - Describe the full change as a single cohesive commit");
