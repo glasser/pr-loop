@@ -293,13 +293,18 @@ fn print_recommendation(
             for (i, actionable) in threads.iter().enumerate() {
                 println!("### Thread {} - {}", i + 1, actionable.location());
                 println!("Thread ID: `{}`", actionable.thread.id);
-                if let Some(last) = actionable.thread.last_comment() {
-                    println!("Last comment by @{}:", last.author);
-                    println!();
-                    // Indent the comment body
-                    for line in last.body.lines() {
+                println!();
+
+                for comment in &actionable.thread.comments {
+                    println!("**@{}:**", comment.author);
+                    for line in comment.body.lines() {
                         println!("> {}", line);
                     }
+                    println!();
+                }
+
+                if i < threads.len() - 1 {
+                    println!("---");
                     println!();
                 }
             }
