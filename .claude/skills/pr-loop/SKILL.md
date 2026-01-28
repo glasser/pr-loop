@@ -1,7 +1,6 @@
 ---
 name: pr-loop
 description: Monitor a PR and respond to review comments and CI failures in a loop
-disable-model-invocation: true
 ---
 
 # PR Loop - Attended Mode
