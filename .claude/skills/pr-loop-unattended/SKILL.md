@@ -14,7 +14,7 @@ Run the pr-loop tool in unattended mode, responding to review comments and CI fa
    - If the PR is **happy** (CI passing, no comments), you're done! Report success to the user.
    - If the PR is **actionable**, continue to step 3
 3. Read the tool output and address one issue:
-   - If there are **review comments needing response**, pick one to address - make the requested changes and reply to the thread using `pr-loop reply --thread <id> --message "<response>"`
+   - If there are **review comments needing response**, pick one to address - make the requested changes and reply using `pr-loop reply` as instructed in the output
    - If there are **CI failures**, investigate and fix them
 4. Commit your changes (as a new commit, not amending) and push
 5. Return to step 1

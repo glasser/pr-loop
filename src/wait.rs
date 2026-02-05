@@ -265,6 +265,14 @@ mod tests {
         fn fetch_threads(&self, _owner: &str, _repo: &str, _pr: u64) -> Result<Vec<ReviewThread>> {
             Ok(self.threads.clone())
         }
+
+        fn fetch_thread_by_comment_id(&self, comment_id: &str) -> Result<ReviewThread> {
+            self.threads
+                .iter()
+                .find(|t| t.comments.iter().any(|c| c.id == comment_id))
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Comment not found: {}", comment_id))
+        }
     }
 
     fn make_check(name: &str, status: CheckStatus) -> Check {

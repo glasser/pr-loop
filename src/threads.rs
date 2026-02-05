@@ -32,6 +32,18 @@ impl ReviewThread {
         self.comments.last()
     }
 
+    /// Returns human (non-Claude) comments that appear after the specified comment ID.
+    /// Returns None if the comment ID is not found in this thread.
+    pub fn human_comments_after(&self, comment_id: &str) -> Option<Vec<ThreadComment>> {
+        let index = self.comments.iter().position(|c| c.id == comment_id)?;
+        let comments_after: Vec<_> = self.comments[index + 1..]
+            .iter()
+            .filter(|c| !c.body.starts_with(CLAUDE_MARKER))
+            .cloned()
+            .collect();
+        Some(comments_after)
+    }
+
     /// Returns true if this thread needs a response from Claude.
     /// A thread needs response if: it's unresolved AND the last comment
     /// doesn't start with the Claude marker.
@@ -105,6 +117,10 @@ pub fn find_actionable_threads(threads: Vec<ReviewThread>) -> Vec<ActionableThre
 pub trait ThreadsClient {
     fn fetch_threads(&self, owner: &str, repo: &str, pr_number: u64)
         -> Result<Vec<ReviewThread>>;
+
+    /// Fetch the thread containing a specific comment, returning both the thread and confirming
+    /// the comment exists.
+    fn fetch_thread_by_comment_id(&self, comment_id: &str) -> Result<ReviewThread>;
 }
 
 /// Real client that uses `gh api graphql`.
@@ -118,6 +134,10 @@ impl ThreadsClient for RealThreadsClient {
         pr_number: u64,
     ) -> Result<Vec<ReviewThread>> {
         fetch_threads_from_graphql(owner, repo, pr_number)
+    }
+
+    fn fetch_thread_by_comment_id(&self, comment_id: &str) -> Result<ReviewThread> {
+        fetch_thread_by_comment_id_graphql(comment_id)
     }
 }
 
@@ -153,6 +173,16 @@ struct PullRequestData {
 #[derive(Deserialize)]
 struct ReviewThreadsConnection {
     nodes: Vec<ReviewThreadNode>,
+    #[serde(rename = "pageInfo")]
+    page_info: PageInfo,
+}
+
+#[derive(Deserialize)]
+struct PageInfo {
+    #[serde(rename = "hasNextPage")]
+    has_next_page: bool,
+    #[serde(rename = "endCursor")]
+    end_cursor: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -168,6 +198,8 @@ struct ReviewThreadNode {
 #[derive(Deserialize)]
 struct CommentsConnection {
     nodes: Vec<CommentNode>,
+    #[serde(rename = "pageInfo")]
+    page_info: PageInfo,
 }
 
 #[derive(Deserialize)]
@@ -182,17 +214,70 @@ struct AuthorNode {
     login: String,
 }
 
-/// Fetch threads using GitHub GraphQL API.
+/// Fetch threads using GitHub GraphQL API with pagination support.
 fn fetch_threads_from_graphql(
     owner: &str,
     repo: &str,
     pr_number: u64,
 ) -> Result<Vec<ReviewThread>> {
+    let mut all_threads: Vec<ReviewThread> = Vec::new();
+    let mut threads_cursor: Option<String> = None;
+
+    // Paginate through all review threads
+    loop {
+        let (thread_nodes, page_info) =
+            fetch_threads_page(owner, repo, pr_number, threads_cursor.as_deref())?;
+
+        for t in thread_nodes {
+            let thread_id = t.id.clone();
+            let mut comments: Vec<ThreadComment> = t
+                .comments
+                .nodes
+                .into_iter()
+                .map(|c| ThreadComment {
+                    id: c.id,
+                    author: c.author.map(|a| a.login).unwrap_or_else(|| "ghost".to_string()),
+                    body: c.body,
+                })
+                .collect();
+
+            // If this thread has more comments, fetch them
+            if t.comments.page_info.has_next_page {
+                let additional_comments =
+                    fetch_remaining_comments(&thread_id, t.comments.page_info.end_cursor)?;
+                comments.extend(additional_comments);
+            }
+
+            all_threads.push(ReviewThread {
+                id: t.id,
+                is_resolved: t.is_resolved,
+                path: t.path,
+                line: t.line,
+                comments,
+            });
+        }
+
+        if !page_info.has_next_page {
+            break;
+        }
+        threads_cursor = page_info.end_cursor;
+    }
+
+    Ok(all_threads)
+}
+
+/// Fetch a single page of review threads.
+fn fetch_threads_page(
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+    cursor: Option<&str>,
+) -> Result<(Vec<ReviewThreadNode>, PageInfo)> {
     let query = r#"
-        query($owner: String!, $repo: String!, $pr: Int!) {
+        query($owner: String!, $repo: String!, $pr: Int!, $cursor: String) {
             repository(owner: $owner, name: $repo) {
                 pullRequest(number: $pr) {
-                    reviewThreads(first: 100) {
+                    reviewThreads(first: 100, after: $cursor) {
                         nodes {
                             id
                             isResolved
@@ -206,7 +291,15 @@ fn fetch_threads_from_graphql(
                                     }
                                     body
                                 }
+                                pageInfo {
+                                    hasNextPage
+                                    endCursor
+                                }
                             }
+                        }
+                        pageInfo {
+                            hasNextPage
+                            endCursor
                         }
                     }
                 }
@@ -214,19 +307,26 @@ fn fetch_threads_from_graphql(
         }
     "#;
 
+    let mut args = vec![
+        "api".to_string(),
+        "graphql".to_string(),
+        "-f".to_string(),
+        format!("query={}", query),
+        "-f".to_string(),
+        format!("owner={}", owner),
+        "-f".to_string(),
+        format!("repo={}", repo),
+        "-F".to_string(),
+        format!("pr={}", pr_number),
+    ];
+
+    if let Some(c) = cursor {
+        args.push("-f".to_string());
+        args.push(format!("cursor={}", c));
+    }
+
     let output = Command::new("gh")
-        .args([
-            "api",
-            "graphql",
-            "-f",
-            &format!("query={}", query),
-            "-f",
-            &format!("owner={}", owner),
-            "-f",
-            &format!("repo={}", repo),
-            "-F",
-            &format!("pr={}", pr_number),
-        ])
+        .args(&args)
         .output()
         .context("Failed to run 'gh api graphql'")?;
 
@@ -243,32 +343,274 @@ fn fetch_threads_from_graphql(
         anyhow::bail!("GraphQL errors: {}", messages.join(", "));
     }
 
-    let threads = response
+    let review_threads = response
         .data
         .and_then(|d| d.repository)
         .and_then(|r| r.pull_request)
-        .map(|pr| pr.review_threads.nodes)
-        .unwrap_or_default();
+        .map(|pr| pr.review_threads)
+        .ok_or_else(|| anyhow::anyhow!("No review threads data in response"))?;
 
-    Ok(threads
+    Ok((review_threads.nodes, review_threads.page_info))
+}
+
+/// Fetch remaining comments for a thread that has more than 100 comments.
+fn fetch_remaining_comments(
+    thread_id: &str,
+    start_cursor: Option<String>,
+) -> Result<Vec<ThreadComment>> {
+    let mut all_comments: Vec<ThreadComment> = Vec::new();
+    let mut cursor = start_cursor;
+
+    loop {
+        let query = r#"
+            query($id: ID!, $cursor: String) {
+                node(id: $id) {
+                    ... on PullRequestReviewThread {
+                        comments(first: 100, after: $cursor) {
+                            nodes {
+                                id
+                                author {
+                                    login
+                                }
+                                body
+                            }
+                            pageInfo {
+                                hasNextPage
+                                endCursor
+                            }
+                        }
+                    }
+                }
+            }
+        "#;
+
+        let mut args = vec![
+            "api".to_string(),
+            "graphql".to_string(),
+            "-f".to_string(),
+            format!("query={}", query),
+            "-f".to_string(),
+            format!("id={}", thread_id),
+        ];
+
+        if let Some(c) = &cursor {
+            args.push("-f".to_string());
+            args.push(format!("cursor={}", c));
+        }
+
+        let output = Command::new("gh")
+            .args(&args)
+            .output()
+            .context("Failed to run 'gh api graphql'")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("GraphQL query failed: {}", stderr.trim());
+        }
+
+        let response: SingleThreadGraphQLResponse = serde_json::from_slice(&output.stdout)
+            .context("Failed to parse GraphQL response")?;
+
+        if let Some(errors) = response.errors {
+            let messages: Vec<_> = errors.iter().map(|e| e.message.as_str()).collect();
+            anyhow::bail!("GraphQL errors: {}", messages.join(", "));
+        }
+
+        let thread_node = response
+            .data
+            .and_then(|d| d.node)
+            .ok_or_else(|| anyhow::anyhow!("Thread not found: {}", thread_id))?;
+
+        let comments: Vec<ThreadComment> = thread_node
+            .comments
+            .nodes
+            .into_iter()
+            .map(|c| ThreadComment {
+                id: c.id,
+                author: c.author.map(|a| a.login).unwrap_or_else(|| "ghost".to_string()),
+                body: c.body,
+            })
+            .collect();
+
+        all_comments.extend(comments);
+
+        if !thread_node.comments.page_info.has_next_page {
+            break;
+        }
+        cursor = thread_node.comments.page_info.end_cursor;
+    }
+
+    Ok(all_comments)
+}
+
+// GraphQL response structures for single thread query
+#[derive(Deserialize)]
+struct SingleThreadGraphQLResponse {
+    data: Option<SingleThreadData>,
+    errors: Option<Vec<GraphQLError>>,
+}
+
+#[derive(Deserialize)]
+struct SingleThreadData {
+    node: Option<ReviewThreadNode>,
+}
+
+/// Fetch the thread containing a specific comment by the comment's ID.
+fn fetch_thread_by_comment_id_graphql(comment_id: &str) -> Result<ReviewThread> {
+    // First, get the thread ID from the comment
+    let query = r#"
+        query($id: ID!) {
+            node(id: $id) {
+                ... on PullRequestReviewComment {
+                    pullRequestReviewThread {
+                        id
+                    }
+                }
+            }
+        }
+    "#;
+
+    let output = Command::new("gh")
+        .args([
+            "api",
+            "graphql",
+            "-f",
+            &format!("query={}", query),
+            "-f",
+            &format!("id={}", comment_id),
+        ])
+        .output()
+        .context("Failed to run 'gh api graphql'")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("GraphQL query failed: {}", stderr.trim());
+    }
+
+    #[derive(Deserialize)]
+    struct CommentQueryResponse {
+        data: Option<CommentQueryData>,
+        errors: Option<Vec<GraphQLError>>,
+    }
+
+    #[derive(Deserialize)]
+    struct CommentQueryData {
+        node: Option<CommentQueryNode>,
+    }
+
+    #[derive(Deserialize)]
+    struct CommentQueryNode {
+        #[serde(rename = "pullRequestReviewThread")]
+        pull_request_review_thread: Option<ThreadIdOnly>,
+    }
+
+    #[derive(Deserialize)]
+    struct ThreadIdOnly {
+        id: String,
+    }
+
+    let response: CommentQueryResponse = serde_json::from_slice(&output.stdout)
+        .context("Failed to parse GraphQL response")?;
+
+    if let Some(errors) = response.errors {
+        let messages: Vec<_> = errors.iter().map(|e| e.message.as_str()).collect();
+        anyhow::bail!("GraphQL errors: {}", messages.join(", "));
+    }
+
+    let thread_id = response
+        .data
+        .and_then(|d| d.node)
+        .and_then(|n| n.pull_request_review_thread)
+        .map(|t| t.id)
+        .ok_or_else(|| anyhow::anyhow!("Comment not found or not a PR review comment: {}", comment_id))?;
+
+    // Now fetch the full thread
+    fetch_thread_by_id_graphql(&thread_id)
+}
+
+/// Fetch a single thread by ID using GitHub GraphQL API with pagination support.
+fn fetch_thread_by_id_graphql(thread_id: &str) -> Result<ReviewThread> {
+    let query = r#"
+        query($id: ID!) {
+            node(id: $id) {
+                ... on PullRequestReviewThread {
+                    id
+                    isResolved
+                    path
+                    line
+                    comments(first: 100) {
+                        nodes {
+                            id
+                            author {
+                                login
+                            }
+                            body
+                        }
+                        pageInfo {
+                            hasNextPage
+                            endCursor
+                        }
+                    }
+                }
+            }
+        }
+    "#;
+
+    let output = Command::new("gh")
+        .args([
+            "api",
+            "graphql",
+            "-f",
+            &format!("query={}", query),
+            "-f",
+            &format!("id={}", thread_id),
+        ])
+        .output()
+        .context("Failed to run 'gh api graphql'")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("GraphQL query failed: {}", stderr.trim());
+    }
+
+    let response: SingleThreadGraphQLResponse = serde_json::from_slice(&output.stdout)
+        .context("Failed to parse GraphQL response")?;
+
+    if let Some(errors) = response.errors {
+        let messages: Vec<_> = errors.iter().map(|e| e.message.as_str()).collect();
+        anyhow::bail!("GraphQL errors: {}", messages.join(", "));
+    }
+
+    let thread_node = response
+        .data
+        .and_then(|d| d.node)
+        .ok_or_else(|| anyhow::anyhow!("Thread not found: {}", thread_id))?;
+
+    let mut comments: Vec<ThreadComment> = thread_node
+        .comments
+        .nodes
         .into_iter()
-        .map(|t| ReviewThread {
-            id: t.id,
-            is_resolved: t.is_resolved,
-            path: t.path,
-            line: t.line,
-            comments: t
-                .comments
-                .nodes
-                .into_iter()
-                .map(|c| ThreadComment {
-                    id: c.id,
-                    author: c.author.map(|a| a.login).unwrap_or_else(|| "ghost".to_string()),
-                    body: c.body,
-                })
-                .collect(),
+        .map(|c| ThreadComment {
+            id: c.id,
+            author: c.author.map(|a| a.login).unwrap_or_else(|| "ghost".to_string()),
+            body: c.body,
         })
-        .collect())
+        .collect();
+
+    // If there are more comments, fetch them
+    if thread_node.comments.page_info.has_next_page {
+        let additional_comments =
+            fetch_remaining_comments(thread_id, thread_node.comments.page_info.end_cursor)?;
+        comments.extend(additional_comments);
+    }
+
+    Ok(ReviewThread {
+        id: thread_node.id,
+        is_resolved: thread_node.is_resolved,
+        path: thread_node.path,
+        line: thread_node.line,
+        comments,
+    })
 }
 
 #[cfg(test)]
@@ -288,6 +630,14 @@ mod tests {
             _pr_number: u64,
         ) -> Result<Vec<ReviewThread>> {
             Ok(self.threads.clone())
+        }
+
+        fn fetch_thread_by_comment_id(&self, comment_id: &str) -> Result<ReviewThread> {
+            self.threads
+                .iter()
+                .find(|t| t.comments.iter().any(|c| c.id == comment_id))
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Comment not found: {}", comment_id))
         }
     }
 
@@ -510,5 +860,97 @@ mod tests {
         );
         let ids = thread.comment_ids();
         assert_eq!(ids.len(), 2);
+    }
+
+    fn make_comment_with_id(id: &str, author: &str, body: &str) -> ThreadComment {
+        ThreadComment {
+            id: id.to_string(),
+            author: author.to_string(),
+            body: body.to_string(),
+        }
+    }
+
+    #[test]
+    fn human_comments_after_returns_human_comments() {
+        let thread = make_thread(
+            "T1",
+            false,
+            vec![
+                make_comment_with_id("C1", "reviewer", "Please fix this"),
+                make_comment_with_id("C2", "claude-bot", "🤖 From Claude: Fixed!"),
+                make_comment_with_id("C3", "reviewer", "Actually, one more thing"),
+                make_comment_with_id("C4", "reviewer", "And another thing"),
+            ],
+        );
+
+        // Comments after C1 (which includes C2 Claude, C3 human, C4 human)
+        // Should return only the human comments (C3, C4)
+        let comments = thread.human_comments_after("C1").unwrap();
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[0].id, "C3");
+        assert_eq!(comments[1].id, "C4");
+    }
+
+    #[test]
+    fn human_comments_after_claude_comment() {
+        let thread = make_thread(
+            "T1",
+            false,
+            vec![
+                make_comment_with_id("C1", "reviewer", "Please fix this"),
+                make_comment_with_id("C2", "claude-bot", "🤖 From Claude: Fixed!"),
+                make_comment_with_id("C3", "reviewer", "Actually, one more thing"),
+            ],
+        );
+
+        // Comments after C2 should just be C3
+        let comments = thread.human_comments_after("C2").unwrap();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].id, "C3");
+    }
+
+    #[test]
+    fn human_comments_after_last_comment() {
+        let thread = make_thread(
+            "T1",
+            false,
+            vec![
+                make_comment_with_id("C1", "reviewer", "Please fix this"),
+                make_comment_with_id("C2", "claude-bot", "🤖 From Claude: Fixed!"),
+            ],
+        );
+
+        // Comments after C2 (the last one) should be empty
+        let comments = thread.human_comments_after("C2").unwrap();
+        assert!(comments.is_empty());
+    }
+
+    #[test]
+    fn human_comments_after_unknown_comment() {
+        let thread = make_thread(
+            "T1",
+            false,
+            vec![make_comment_with_id("C1", "reviewer", "Please fix this")],
+        );
+
+        // Unknown comment should return None
+        assert!(thread.human_comments_after("unknown").is_none());
+    }
+
+    #[test]
+    fn human_comments_after_filters_claude() {
+        let thread = make_thread(
+            "T1",
+            false,
+            vec![
+                make_comment_with_id("C1", "reviewer", "First"),
+                make_comment_with_id("C2", "claude-bot", "🤖 From Claude: Response"),
+                make_comment_with_id("C3", "other-claude", "🤖 From Claude: Another response"),
+            ],
+        );
+
+        // Comments after C1 should filter out both Claude comments
+        let comments = thread.human_comments_after("C1").unwrap();
+        assert!(comments.is_empty());
     }
 }

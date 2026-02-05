@@ -63,9 +63,12 @@ pub struct Cli {
 pub enum Command {
     /// Reply to a review thread comment
     Reply {
-        /// The review thread ID to reply to
+        /// The comment ID this reply is responding to. The thread is derived from
+        /// the comment. If there are newer human comments after this one, an
+        /// acknowledgment will be added and those comments will be printed for
+        /// the invoker to address.
         #[arg(long)]
-        thread: String,
+        in_reply_to: String,
 
         /// The message to post (will be prefixed with "🤖 From Claude:")
         #[arg(long)]
@@ -140,14 +143,14 @@ mod tests {
         let cli = Cli::parse_from([
             "pr-loop",
             "reply",
-            "--thread",
-            "PRRT_123",
+            "--in-reply-to",
+            "PRRC_456",
             "--message",
             "Fixed the issue",
         ]);
         match cli.command {
-            Some(Command::Reply { thread, message }) => {
-                assert_eq!(thread, "PRRT_123");
+            Some(Command::Reply { in_reply_to, message }) => {
+                assert_eq!(in_reply_to, "PRRC_456");
                 assert_eq!(message, "Fixed the issue");
             }
             _ => panic!("Expected Reply command"),
@@ -163,8 +166,8 @@ mod tests {
             "--pr",
             "42",
             "reply",
-            "--thread",
-            "T1",
+            "--in-reply-to",
+            "C1",
             "--message",
             "msg",
         ]);

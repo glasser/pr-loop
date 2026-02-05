@@ -87,18 +87,58 @@ fn main() {
     }
 
     match cli.command {
-        Some(Command::Reply { thread, message }) => {
+        Some(Command::Reply { in_reply_to, message }) => {
             let reply_client = RealReplyClient;
-            let formatted_message = format_claude_message(&message);
+            let threads_client = RealThreadsClient;
+
+            // Fetch the thread containing this comment
+            let thread_data = match threads_client.fetch_thread_by_comment_id(&in_reply_to) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("Error: Could not fetch thread for comment {}: {}", in_reply_to, e);
+                    std::process::exit(1);
+                }
+            };
+
+            let thread_id = thread_data.id.clone();
+
+            // Check for newer human comments after the one we're replying to
+            let newer_comments = match thread_data.human_comments_after(&in_reply_to) {
+                Some(comments) => comments,
+                None => {
+                    eprintln!(
+                        "Error: Comment {} not found in thread {}",
+                        in_reply_to, thread_id
+                    );
+                    std::process::exit(1);
+                }
+            };
+
+            // Modify message if there are newer human comments
+            let final_message = if !newer_comments.is_empty() {
+                format!(
+                    "{}\n\n(Looks like you had something else to say here while I was working. I'll look at that now.)",
+                    message
+                )
+            } else {
+                message.clone()
+            };
+
+            let formatted_message = format_claude_message(&final_message);
 
             println!(
                 "Replying to thread {} on {}/{}#{}",
-                thread, pr_context.owner, pr_context.repo, pr_context.pr_number
+                thread_id, pr_context.owner, pr_context.repo, pr_context.pr_number
             );
 
-            match reply_client.post_reply(&thread, &formatted_message) {
+            match reply_client.post_reply(&thread_id, &formatted_message) {
                 Ok(result) => {
                     println!("✓ Reply posted (comment ID: {})", result.comment_id);
+
+                    // If there were newer comments, print them for the invoker
+                    if !newer_comments.is_empty() {
+                        print_newer_comments(&newer_comments, &thread_id);
+                    }
                 }
                 Err(e) => {
                     eprintln!("Error: Failed to post reply: {}", e);
@@ -296,7 +336,7 @@ fn print_recommendation(
                 println!();
 
                 for comment in &actionable.thread.comments {
-                    println!("**@{}:**", comment.author);
+                    println!("**@{}** (comment `{}`):", comment.author, comment.id);
                     for line in comment.body.lines() {
                         println!("> {}", line);
                     }
@@ -311,9 +351,10 @@ fn print_recommendation(
 
             println!("To reply, use:");
             println!(
-                "  pr-loop reply --thread <THREAD_ID> --message \"Your response\""
+                "  pr-loop reply --in-reply-to <COMMENT_ID> --message \"Your response\""
             );
             println!();
+            println!("The --in-reply-to should be the ID of the last comment shown above.");
             println!(
                 "Your message will be prefixed with \"{}\"",
                 CLAUDE_MARKER
@@ -405,6 +446,30 @@ fn print_recommendation(
             println!();
             println!("The PR is ready for merge or further review.");
         }
+    }
+}
+
+/// Print newer comments that were posted while the LLM was working.
+fn print_newer_comments(comments: &[threads::ThreadComment], thread_id: &str) {
+    println!();
+    println!("## NEWER COMMENTS DETECTED");
+    println!();
+    println!(
+        "The following {} comment{} {} posted to this thread while you were working.",
+        comments.len(),
+        if comments.len() == 1 { "" } else { "s" },
+        if comments.len() == 1 { "was" } else { "were" }
+    );
+    println!("Please address {} as well:", if comments.len() == 1 { "it" } else { "them" });
+    println!();
+
+    for (i, comment) in comments.iter().enumerate() {
+        println!("### Comment {} (in thread {})", i + 1, thread_id);
+        println!("**@{}:**", comment.author);
+        for line in comment.body.lines() {
+            println!("> {}", line);
+        }
+        println!();
     }
 }
 
