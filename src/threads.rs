@@ -457,13 +457,17 @@ struct SingleThreadData {
 
 /// Fetch the thread containing a specific comment by the comment's ID.
 fn fetch_thread_by_comment_id_graphql(comment_id: &str) -> Result<ReviewThread> {
-    // First, get the thread ID from the comment
+    // First, get the PR info from the comment (GitHub doesn't expose a direct thread field)
     let query = r#"
         query($id: ID!) {
             node(id: $id) {
                 ... on PullRequestReviewComment {
-                    pullRequestReviewThread {
-                        id
+                    pullRequest {
+                        number
+                        repository {
+                            owner { login }
+                            name
+                        }
                     }
                 }
             }
@@ -500,13 +504,25 @@ fn fetch_thread_by_comment_id_graphql(comment_id: &str) -> Result<ReviewThread> 
 
     #[derive(Deserialize)]
     struct CommentQueryNode {
-        #[serde(rename = "pullRequestReviewThread")]
-        pull_request_review_thread: Option<ThreadIdOnly>,
+        #[serde(rename = "pullRequest")]
+        pull_request: Option<PullRequestInfo>,
     }
 
     #[derive(Deserialize)]
-    struct ThreadIdOnly {
-        id: String,
+    struct PullRequestInfo {
+        number: u64,
+        repository: RepositoryInfo,
+    }
+
+    #[derive(Deserialize)]
+    struct RepositoryInfo {
+        owner: OwnerInfo,
+        name: String,
+    }
+
+    #[derive(Deserialize)]
+    struct OwnerInfo {
+        login: String,
     }
 
     let response: CommentQueryResponse = serde_json::from_slice(&output.stdout)
@@ -517,100 +533,23 @@ fn fetch_thread_by_comment_id_graphql(comment_id: &str) -> Result<ReviewThread> 
         anyhow::bail!("GraphQL errors: {}", messages.join(", "));
     }
 
-    let thread_id = response
+    let pr_info = response
         .data
         .and_then(|d| d.node)
-        .and_then(|n| n.pull_request_review_thread)
-        .map(|t| t.id)
+        .and_then(|n| n.pull_request)
         .ok_or_else(|| anyhow::anyhow!("Comment not found or not a PR review comment: {}", comment_id))?;
 
-    // Now fetch the full thread
-    fetch_thread_by_id_graphql(&thread_id)
-}
+    // Now fetch all threads from the PR and find the one containing this comment
+    let threads = fetch_threads_from_graphql(
+        &pr_info.repository.owner.login,
+        &pr_info.repository.name,
+        pr_info.number,
+    )?;
 
-/// Fetch a single thread by ID using GitHub GraphQL API with pagination support.
-fn fetch_thread_by_id_graphql(thread_id: &str) -> Result<ReviewThread> {
-    let query = r#"
-        query($id: ID!) {
-            node(id: $id) {
-                ... on PullRequestReviewThread {
-                    id
-                    isResolved
-                    path
-                    line
-                    comments(first: 100) {
-                        nodes {
-                            id
-                            author {
-                                login
-                            }
-                            body
-                        }
-                        pageInfo {
-                            hasNextPage
-                            endCursor
-                        }
-                    }
-                }
-            }
-        }
-    "#;
-
-    let output = Command::new("gh")
-        .args([
-            "api",
-            "graphql",
-            "-f",
-            &format!("query={}", query),
-            "-f",
-            &format!("id={}", thread_id),
-        ])
-        .output()
-        .context("Failed to run 'gh api graphql'")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("GraphQL query failed: {}", stderr.trim());
-    }
-
-    let response: SingleThreadGraphQLResponse = serde_json::from_slice(&output.stdout)
-        .context("Failed to parse GraphQL response")?;
-
-    if let Some(errors) = response.errors {
-        let messages: Vec<_> = errors.iter().map(|e| e.message.as_str()).collect();
-        anyhow::bail!("GraphQL errors: {}", messages.join(", "));
-    }
-
-    let thread_node = response
-        .data
-        .and_then(|d| d.node)
-        .ok_or_else(|| anyhow::anyhow!("Thread not found: {}", thread_id))?;
-
-    let mut comments: Vec<ThreadComment> = thread_node
-        .comments
-        .nodes
+    threads
         .into_iter()
-        .map(|c| ThreadComment {
-            id: c.id,
-            author: c.author.map(|a| a.login).unwrap_or_else(|| "ghost".to_string()),
-            body: c.body,
-        })
-        .collect();
-
-    // If there are more comments, fetch them
-    if thread_node.comments.page_info.has_next_page {
-        let additional_comments =
-            fetch_remaining_comments(thread_id, thread_node.comments.page_info.end_cursor)?;
-        comments.extend(additional_comments);
-    }
-
-    Ok(ReviewThread {
-        id: thread_node.id,
-        is_resolved: thread_node.is_resolved,
-        path: thread_node.path,
-        line: thread_node.line,
-        comments,
-    })
+        .find(|t| t.comments.iter().any(|c| c.id == comment_id))
+        .ok_or_else(|| anyhow::anyhow!("Comment {} not found in any thread", comment_id))
 }
 
 #[cfg(test)]
