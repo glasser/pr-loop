@@ -1,0 +1,31 @@
+query FetchThreads($owner: String!, $repo: String!, $pr: Int!, $cursor: String) {
+    repository(owner: $owner, name: $repo) {
+        pullRequest(number: $pr) {
+            reviewThreads(first: 100, after: $cursor) {
+                nodes {
+                    id
+                    isResolved
+                    path
+                    line
+                    comments(first: 100) {
+                        nodes {
+                            id
+                            author {
+                                login
+                            }
+                            body
+                        }
+                        pageInfo {
+                            hasNextPage
+                            endCursor
+                        }
+                    }
+                }
+                pageInfo {
+                    hasNextPage
+                    endCursor
+                }
+            }
+        }
+    }
+}

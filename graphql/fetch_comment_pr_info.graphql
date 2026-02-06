@@ -1,0 +1,15 @@
+query FetchCommentPrInfo($id: ID!) {
+    node(id: $id) {
+        ... on PullRequestReviewComment {
+            pullRequest {
+                number
+                repository {
+                    owner {
+                        login
+                    }
+                    name
+                }
+            }
+        }
+    }
+}

@@ -8,6 +8,8 @@ mod cli;
 mod credentials;
 mod git;
 mod github;
+#[cfg(test)]
+mod graphql_validation;
 mod pr;
 mod reply;
 mod threads;

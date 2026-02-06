@@ -1,0 +1,19 @@
+query FetchRemainingComments($id: ID!, $cursor: String) {
+    node(id: $id) {
+        ... on PullRequestReviewThread {
+            comments(first: 100, after: $cursor) {
+                nodes {
+                    id
+                    author {
+                        login
+                    }
+                    body
+                }
+                pageInfo {
+                    hasNextPage
+                    endCursor
+                }
+            }
+        }
+    }
+}

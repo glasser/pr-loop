@@ -28,3 +28,6 @@ glob = "0.3"
 # Testing utilities
 tokio-test = "0.4"
 serial_test = "3"
+
+# GraphQL schema validation
+apollo-compiler = "1"
