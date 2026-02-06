@@ -75,6 +75,16 @@ export PR_LOOP_INCLUDE_CHECKS="ci/*,build"
 export PR_LOOP_EXCLUDE_CHECKS="lint"
 ```
 
+## Claude Code Skills
+
+This repo includes Claude Code skills in `.claude/skills/` that automate PR iteration:
+
+- **`/pr-loop`** (Attended Mode): Runs a loop responding to review comments and CI failures until you tell it to stop. Use when you want to stay engaged and provide guidance.
+
+- **`/pr-loop-unattended`** (Unattended Mode): Runs autonomously until the PR is "happy" (CI passing, no unaddressed comments). Use when you're stepping away and want Claude to handle things.
+
+Both skills require the PR to be in draft mode when using `--maintain-status`.
+
 ## GraphQL Schema Validation
 
 The project validates all GraphQL queries against GitHub's schema at test time. Query files are in `graphql/operation/` and the schema is in `graphql/schema/`. The source code uses `include_str!` to load queries from these files, ensuring the validated queries are the same ones used at runtime.
