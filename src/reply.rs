@@ -59,20 +59,12 @@ struct CommentNode {
     id: String,
 }
 
+/// GraphQL mutation for adding a reply (loaded from graphql/operation/).
+const ADD_REPLY_MUTATION: &str = include_str!("../graphql/operation/add_reply.graphql");
+
 /// Post a reply to a thread using GraphQL.
 fn post_reply_graphql(thread_id: &str, body: &str) -> Result<ReplyResult> {
-    let mutation = r#"
-        mutation($threadId: ID!, $body: String!) {
-            addPullRequestReviewThreadReply(input: {
-                pullRequestReviewThreadId: $threadId,
-                body: $body
-            }) {
-                comment {
-                    id
-                }
-            }
-        }
-    "#;
+    let mutation = ADD_REPLY_MUTATION;
 
     let output = Command::new("gh")
         .args([
@@ -111,17 +103,12 @@ fn post_reply_graphql(thread_id: &str, body: &str) -> Result<ReplyResult> {
     Ok(ReplyResult { comment_id })
 }
 
+/// GraphQL mutation for deleting a comment (loaded from graphql/operation/).
+const DELETE_COMMENT_MUTATION: &str = include_str!("../graphql/operation/delete_comment.graphql");
+
 /// Delete a PR review comment using GraphQL.
 fn delete_comment_graphql(comment_id: &str) -> Result<()> {
-    let mutation = r#"
-        mutation($commentId: ID!) {
-            deletePullRequestReviewComment(input: {
-                id: $commentId
-            }) {
-                clientMutationId
-            }
-        }
-    "#;
+    let mutation = DELETE_COMMENT_MUTATION;
 
     let output = Command::new("gh")
         .args([

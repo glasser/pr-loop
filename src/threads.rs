@@ -267,45 +267,16 @@ fn fetch_threads_from_graphql(
 }
 
 /// Fetch a single page of review threads.
+/// GraphQL query for fetching review threads (loaded from graphql/operation/).
+const FETCH_THREADS_QUERY: &str = include_str!("../graphql/operation/fetch_threads.graphql");
+
 fn fetch_threads_page(
     owner: &str,
     repo: &str,
     pr_number: u64,
     cursor: Option<&str>,
 ) -> Result<(Vec<ReviewThreadNode>, PageInfo)> {
-    let query = r#"
-        query($owner: String!, $repo: String!, $pr: Int!, $cursor: String) {
-            repository(owner: $owner, name: $repo) {
-                pullRequest(number: $pr) {
-                    reviewThreads(first: 100, after: $cursor) {
-                        nodes {
-                            id
-                            isResolved
-                            path
-                            line
-                            comments(first: 100) {
-                                nodes {
-                                    id
-                                    author {
-                                        login
-                                    }
-                                    body
-                                }
-                                pageInfo {
-                                    hasNextPage
-                                    endCursor
-                                }
-                            }
-                        }
-                        pageInfo {
-                            hasNextPage
-                            endCursor
-                        }
-                    }
-                }
-            }
-        }
-    "#;
+    let query = FETCH_THREADS_QUERY;
 
     let mut args = vec![
         "api".to_string(),
@@ -353,6 +324,10 @@ fn fetch_threads_page(
     Ok((review_threads.nodes, review_threads.page_info))
 }
 
+/// GraphQL query for fetching remaining comments (loaded from graphql/operation/).
+const FETCH_REMAINING_COMMENTS_QUERY: &str =
+    include_str!("../graphql/operation/fetch_remaining_comments.graphql");
+
 /// Fetch remaining comments for a thread that has more than 100 comments.
 fn fetch_remaining_comments(
     thread_id: &str,
@@ -362,27 +337,7 @@ fn fetch_remaining_comments(
     let mut cursor = start_cursor;
 
     loop {
-        let query = r#"
-            query($id: ID!, $cursor: String) {
-                node(id: $id) {
-                    ... on PullRequestReviewThread {
-                        comments(first: 100, after: $cursor) {
-                            nodes {
-                                id
-                                author {
-                                    login
-                                }
-                                body
-                            }
-                            pageInfo {
-                                hasNextPage
-                                endCursor
-                            }
-                        }
-                    }
-                }
-            }
-        "#;
+        let query = FETCH_REMAINING_COMMENTS_QUERY;
 
         let mut args = vec![
             "api".to_string(),
@@ -455,24 +410,14 @@ struct SingleThreadData {
     node: Option<ReviewThreadNode>,
 }
 
+/// GraphQL query for fetching PR info from a comment (loaded from graphql/operation/).
+const FETCH_COMMENT_PR_INFO_QUERY: &str =
+    include_str!("../graphql/operation/fetch_comment_pr_info.graphql");
+
 /// Fetch the thread containing a specific comment by the comment's ID.
 fn fetch_thread_by_comment_id_graphql(comment_id: &str) -> Result<ReviewThread> {
     // First, get the PR info from the comment (GitHub doesn't expose a direct thread field)
-    let query = r#"
-        query($id: ID!) {
-            node(id: $id) {
-                ... on PullRequestReviewComment {
-                    pullRequest {
-                        number
-                        repository {
-                            owner { login }
-                            name
-                        }
-                    }
-                }
-            }
-        }
-    "#;
+    let query = FETCH_COMMENT_PR_INFO_QUERY;
 
     let output = Command::new("gh")
         .args([
