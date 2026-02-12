@@ -513,10 +513,52 @@ fn update_pr_status(
     Ok(())
 }
 
+/// Delete a batch of comments in parallel with bounded concurrency.
+/// Returns (success_count, failure_count).
+fn delete_comments_parallel(comment_ids: &[&str], max_concurrent: usize) -> (usize, usize) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let success_count = Arc::new(AtomicUsize::new(0));
+    let failure_count = Arc::new(AtomicUsize::new(0));
+
+    // Process in chunks of max_concurrent
+    for chunk in comment_ids.chunks(max_concurrent) {
+        let handles: Vec<_> = chunk
+            .iter()
+            .map(|&id| {
+                let id = id.to_string();
+                let success = Arc::clone(&success_count);
+                let failure = Arc::clone(&failure_count);
+                std::thread::spawn(move || {
+                    let client = RealReplyClient;
+                    match client.delete_comment(&id) {
+                        Ok(()) => {
+                            success.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(e) => {
+                            eprintln!("Warning: Failed to delete comment {}: {}", id, e);
+                            failure.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().expect("thread panicked during comment deletion");
+        }
+    }
+
+    (
+        success_count.load(Ordering::Relaxed),
+        failure_count.load(Ordering::Relaxed),
+    )
+}
+
 /// Run the `clean-threads` subcommand: delete resolved pure-Claude threads.
 fn run_clean_threads_command(pr_context: &PrContext) {
     let threads_client = RealThreadsClient;
-    let reply_client = RealReplyClient;
 
     println!("Deleting resolved pure-Claude threads...");
     match threads_client.fetch_threads(&pr_context.owner, &pr_context.repo, pr_context.pr_number) {
@@ -529,22 +571,20 @@ fn run_clean_threads_command(pr_context: &PrContext) {
             if pure_claude_threads.is_empty() {
                 println!("  (no resolved pure-Claude threads found)");
             } else {
-                let mut deleted_count = 0;
-                for thread in &pure_claude_threads {
-                    for comment_id in thread.comment_ids() {
-                        match reply_client.delete_comment(comment_id) {
-                            Ok(()) => deleted_count += 1,
-                            Err(e) => {
-                                eprintln!("Warning: Failed to delete comment {}: {}", comment_id, e);
-                            }
-                        }
-                    }
-                }
+                let comment_ids: Vec<&str> = pure_claude_threads
+                    .iter()
+                    .flat_map(|t| t.comment_ids())
+                    .collect();
+
+                let (deleted, failed) = delete_comments_parallel(&comment_ids, 10);
                 println!(
                     "✓ Deleted {} comment(s) from {} pure-Claude thread(s)",
-                    deleted_count,
+                    deleted,
                     pure_claude_threads.len()
                 );
+                if failed > 0 {
+                    eprintln!("  ({} deletion(s) failed)", failed);
+                }
             }
         }
         Err(e) => {
@@ -564,7 +604,6 @@ fn run_ready_command(
 ) {
     let checks_client = RealChecksClient;
     let threads_client = RealThreadsClient;
-    let reply_client = RealReplyClient;
 
     // Step 1: Check that PR is in draft mode
     println!("Checking PR draft status...");
@@ -675,18 +714,13 @@ fn run_ready_command(
                 if pure_claude_threads.is_empty() {
                     println!("  (no pure-Claude threads found)");
                 } else {
-                    let mut deleted_count = 0;
-                    for thread in pure_claude_threads {
-                        for comment_id in thread.comment_ids() {
-                            match reply_client.delete_comment(comment_id) {
-                                Ok(()) => deleted_count += 1,
-                                Err(e) => {
-                                    eprintln!("Warning: Failed to delete comment {}: {}", comment_id, e);
-                                }
-                            }
-                        }
-                    }
-                    println!("✓ Deleted {} comment(s) from pure-Claude threads", deleted_count);
+                    let comment_ids: Vec<&str> = pure_claude_threads
+                        .iter()
+                        .flat_map(|t| t.comment_ids())
+                        .collect();
+
+                    let (deleted, _) = delete_comments_parallel(&comment_ids, 10);
+                    println!("✓ Deleted {} comment(s) from pure-Claude threads", deleted);
                 }
             }
             Err(e) => {
