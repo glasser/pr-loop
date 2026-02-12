@@ -159,6 +159,10 @@ fn main() {
             );
         }
 
+        Some(Command::CleanThreads) => {
+            run_clean_threads_command(&pr_context);
+        }
+
         None => {
             let checks_client = RealChecksClient;
             let threads_client = RealThreadsClient;
@@ -507,6 +511,47 @@ fn update_pr_status(
     pr_client.set_body(&pr_context.owner, &pr_context.repo, pr_context.pr_number, &new_body)?;
     eprintln!("✓ Updated PR status block");
     Ok(())
+}
+
+/// Run the `clean-threads` subcommand: delete resolved pure-Claude threads.
+fn run_clean_threads_command(pr_context: &PrContext) {
+    let threads_client = RealThreadsClient;
+    let reply_client = RealReplyClient;
+
+    println!("Deleting resolved pure-Claude threads...");
+    match threads_client.fetch_threads(&pr_context.owner, &pr_context.repo, pr_context.pr_number) {
+        Ok(threads) => {
+            let pure_claude_threads: Vec<_> = threads
+                .iter()
+                .filter(|t| t.is_resolved && t.is_pure_claude())
+                .collect();
+
+            if pure_claude_threads.is_empty() {
+                println!("  (no resolved pure-Claude threads found)");
+            } else {
+                let mut deleted_count = 0;
+                for thread in &pure_claude_threads {
+                    for comment_id in thread.comment_ids() {
+                        match reply_client.delete_comment(comment_id) {
+                            Ok(()) => deleted_count += 1,
+                            Err(e) => {
+                                eprintln!("Warning: Failed to delete comment {}: {}", comment_id, e);
+                            }
+                        }
+                    }
+                }
+                println!(
+                    "✓ Deleted {} comment(s) from {} pure-Claude thread(s)",
+                    deleted_count,
+                    pure_claude_threads.len()
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("Error: Failed to fetch threads: {}", e);
+            std::process::exit(1);
+        }
+    }
 }
 
 /// Run the `ready` subcommand.

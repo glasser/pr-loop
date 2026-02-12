@@ -84,6 +84,11 @@ pub enum Command {
         #[arg(long)]
         preserve_claude_threads: bool,
     },
+
+    /// Delete resolved review threads where all comments are from Claude.
+    /// These are typically noise from the LLM iteration process.
+    /// Unlike `ready`, this does not validate PR state or mark it as non-draft.
+    CleanThreads,
 }
 
 #[cfg(test)]
@@ -300,6 +305,20 @@ mod tests {
             }
             _ => panic!("Expected Ready command"),
         }
+    }
+
+    #[test]
+    fn parse_clean_threads_command() {
+        let cli = Cli::parse_from(["pr-loop", "clean-threads"]);
+        assert!(matches!(cli.command, Some(Command::CleanThreads)));
+    }
+
+    #[test]
+    fn parse_clean_threads_command_with_global_args() {
+        let cli = Cli::parse_from(["pr-loop", "--repo", "owner/repo", "--pr", "123", "clean-threads"]);
+        assert_eq!(cli.repo, Some("owner/repo".to_string()));
+        assert_eq!(cli.pr, Some(123));
+        assert!(matches!(cli.command, Some(Command::CleanThreads)));
     }
 
     #[test]
