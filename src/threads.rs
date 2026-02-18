@@ -26,6 +26,14 @@ pub struct ReviewThread {
 /// The marker prefix that Claude uses when replying to threads.
 pub const CLAUDE_MARKER: &str = "🤖 From Claude:";
 
+/// The markers used to indicate a thread should be preserved for human review.
+/// Threads containing either marker in any comment are ignored by the tool
+/// (not counted as actionable or unresolved) and preserved during thread cleanup.
+/// GitHub renders `:paperclip:` as the unicode 📎 in the stored body, so we
+/// check for both forms.
+pub const PAPERCLIP_SHORTCODE: &str = ":paperclip:";
+pub const PAPERCLIP_EMOJI: &str = "📎";
+
 impl ReviewThread {
     /// Returns the last comment in the thread.
     pub fn last_comment(&self) -> Option<&ThreadComment> {
@@ -81,6 +89,14 @@ impl ReviewThread {
         })
     }
 
+    /// Returns true if any comment in this thread contains a paperclip marker.
+    /// Paperclip threads are preserved for human review and ignored by the tool.
+    pub fn has_paperclip(&self) -> bool {
+        self.comments
+            .iter()
+            .any(|c| c.body.contains(PAPERCLIP_SHORTCODE) || c.body.contains(PAPERCLIP_EMOJI))
+    }
+
     /// Returns the IDs of all comments in this thread.
     pub fn comment_ids(&self) -> Vec<&str> {
         self.comments.iter().map(|c| c.id.as_str()).collect()
@@ -105,10 +121,11 @@ impl ActionableThread {
 }
 
 /// Find all threads that need a response from Claude.
+/// Threads with the paperclip marker are excluded (preserved for human review).
 pub fn find_actionable_threads(threads: Vec<ReviewThread>) -> Vec<ActionableThread> {
     threads
         .into_iter()
-        .filter(|t| t.needs_response())
+        .filter(|t| !t.has_paperclip() && t.needs_response())
         .map(|thread| ActionableThread { thread })
         .collect()
 }
@@ -836,5 +853,98 @@ mod tests {
         // Comments after C1 should filter out both Claude comments
         let comments = thread.human_comments_after("C1").unwrap();
         assert!(comments.is_empty());
+    }
+
+    #[test]
+    fn has_paperclip_shortcode_in_first_comment() {
+        let thread = make_thread(
+            "T1",
+            false,
+            vec![
+                make_comment("reviewer", ":paperclip: This should stick around for human review"),
+                make_comment("claude-bot", "🤖 From Claude: Noted"),
+            ],
+        );
+        assert!(thread.has_paperclip());
+    }
+
+    #[test]
+    fn has_paperclip_unicode_emoji() {
+        // GitHub renders :paperclip: as 📎 in the stored body
+        let thread = make_thread(
+            "T1",
+            false,
+            vec![make_comment("reviewer", "📎 This should stick around")],
+        );
+        assert!(thread.has_paperclip());
+    }
+
+    #[test]
+    fn has_paperclip_in_later_comment() {
+        let thread = make_thread(
+            "T1",
+            false,
+            vec![
+                make_comment("reviewer", "Some question"),
+                make_comment("reviewer", "Actually :paperclip: keep this"),
+            ],
+        );
+        assert!(thread.has_paperclip());
+    }
+
+    #[test]
+    fn has_paperclip_no_marker() {
+        let thread = make_thread(
+            "T1",
+            false,
+            vec![make_comment("reviewer", "Just a normal comment")],
+        );
+        assert!(!thread.has_paperclip());
+    }
+
+    #[test]
+    fn has_paperclip_empty_thread() {
+        let thread = ReviewThread {
+            id: "T1".to_string(),
+            is_resolved: false,
+            path: None,
+            line: None,
+            comments: vec![],
+        };
+        assert!(!thread.has_paperclip());
+    }
+
+    #[test]
+    fn find_actionable_threads_skips_paperclip() {
+        let threads = vec![
+            make_thread("T1", false, vec![make_comment("reviewer", "Fix this")]),
+            make_thread(
+                "T2",
+                false,
+                vec![make_comment("reviewer", ":paperclip: Keep for human review")],
+            ),
+            make_thread("T3", false, vec![make_comment("reviewer", "Another issue")]),
+        ];
+
+        let actionable = find_actionable_threads(threads);
+        assert_eq!(actionable.len(), 2);
+        assert_eq!(actionable[0].thread.id, "T1");
+        assert_eq!(actionable[1].thread.id, "T3");
+    }
+
+    #[test]
+    fn find_actionable_threads_skips_paperclip_even_if_only_in_one_comment() {
+        // Thread has a paperclip in only one comment but the whole thread is excluded
+        let threads = vec![make_thread(
+            "T1",
+            false,
+            vec![
+                make_comment("reviewer", "Fix this"),
+                make_comment("reviewer", ":paperclip: But also note this"),
+            ],
+        )];
+
+        let actionable = find_actionable_threads(threads);
+        assert!(actionable.is_empty());
     }
 }

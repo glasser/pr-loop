@@ -27,7 +27,10 @@ use git::RealGitClient;
 use github::{resolve_pr_context, PrContext, RealGitHubClient};
 use pr::{has_status_block, remove_status_block, update_body_with_status, PrClient, RealPrClient};
 use reply::{format_claude_message, RealReplyClient, ReplyClient};
-use threads::{RealThreadsClient, ThreadsClient, CLAUDE_MARKER};
+use threads::{
+    RealThreadsClient, ReviewThread, ThreadsClient, CLAUDE_MARKER, PAPERCLIP_EMOJI,
+    PAPERCLIP_SHORTCODE,
+};
 use wait::{capture_snapshot, wait_until_actionable, wait_until_actionable_or_happy, WaitResult};
 
 fn main() {
@@ -556,6 +559,55 @@ fn delete_comments_parallel(comment_ids: &[&str], max_concurrent: usize) -> (usi
     )
 }
 
+/// Strip the paperclip marker from comments in paperclip threads.
+/// These threads are preserved for human review; the marker is removed so the
+/// human reviewer sees the comments without the marker noise.
+fn strip_paperclips(threads: &[ReviewThread]) {
+    let paperclip_threads: Vec<_> = threads.iter().filter(|t| t.has_paperclip()).collect();
+
+    if paperclip_threads.is_empty() {
+        return;
+    }
+
+    let client = RealReplyClient;
+    let mut updated = 0;
+    let mut failed = 0;
+
+    for thread in &paperclip_threads {
+        for comment in &thread.comments {
+            if comment.body.contains(PAPERCLIP_SHORTCODE)
+                || comment.body.contains(PAPERCLIP_EMOJI)
+            {
+                let new_body = comment
+                    .body
+                    .replace(PAPERCLIP_SHORTCODE, "")
+                    .replace(PAPERCLIP_EMOJI, "");
+                match client.update_comment(&comment.id, &new_body) {
+                    Ok(()) => updated += 1,
+                    Err(e) => {
+                        eprintln!(
+                            "Warning: Failed to strip paperclip from comment {}: {}",
+                            comment.id, e
+                        );
+                        failed += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    if updated > 0 {
+        println!(
+            "✓ Stripped paperclip marker from {} comment(s) in {} thread(s)",
+            updated,
+            paperclip_threads.len()
+        );
+    }
+    if failed > 0 {
+        eprintln!("  ({} update(s) failed)", failed);
+    }
+}
+
 /// Run the `clean-threads` subcommand: delete resolved pure-Claude threads.
 fn run_clean_threads_command(pr_context: &PrContext) {
     let threads_client = RealThreadsClient;
@@ -563,9 +615,13 @@ fn run_clean_threads_command(pr_context: &PrContext) {
     println!("Deleting resolved pure-Claude threads...");
     match threads_client.fetch_threads(&pr_context.owner, &pr_context.repo, pr_context.pr_number) {
         Ok(threads) => {
+            // Delete pure-Claude threads first, before stripping paperclips.
+            // This ordering matters: if we stripped paperclips first and then
+            // deletion failed midway, a retry would no longer detect the
+            // paperclip threads and might incorrectly delete them.
             let pure_claude_threads: Vec<_> = threads
                 .iter()
-                .filter(|t| t.is_resolved && t.is_pure_claude())
+                .filter(|t| !t.has_paperclip() && t.is_resolved && t.is_pure_claude())
                 .collect();
 
             if pure_claude_threads.is_empty() {
@@ -586,6 +642,9 @@ fn run_clean_threads_command(pr_context: &PrContext) {
                     eprintln!("  ({} deletion(s) failed)", failed);
                 }
             }
+
+            // Strip paperclip markers (these threads are preserved for human review)
+            strip_paperclips(&threads);
         }
         Err(e) => {
             eprintln!("Error: Failed to fetch threads: {}", e);
@@ -701,14 +760,16 @@ fn run_ready_command(
     println!("✓ All threads resolved");
     println!("✓ All CI checks passed");
 
-    // Step 4: Delete pure-Claude threads unless preservation is requested
-    if !preserve_claude_threads {
-        println!("Deleting pure-Claude threads...");
-        match threads_client.fetch_threads(&pr_context.owner, &pr_context.repo, pr_context.pr_number) {
-            Ok(threads) => {
+    // Step 4: Clean up threads (delete pure-Claude threads, then strip paperclips)
+    // Deletion before stripping: if we stripped first and deletion failed midway,
+    // a retry would no longer detect paperclip threads and might delete them.
+    match threads_client.fetch_threads(&pr_context.owner, &pr_context.repo, pr_context.pr_number) {
+        Ok(threads) => {
+            if !preserve_claude_threads {
+                println!("Deleting pure-Claude threads...");
                 let pure_claude_threads: Vec<_> = threads
                     .iter()
-                    .filter(|t| t.is_resolved && t.is_pure_claude())
+                    .filter(|t| !t.has_paperclip() && t.is_resolved && t.is_pure_claude())
                     .collect();
 
                 if pure_claude_threads.is_empty() {
@@ -723,9 +784,12 @@ fn run_ready_command(
                     println!("✓ Deleted {} comment(s) from pure-Claude threads", deleted);
                 }
             }
-            Err(e) => {
-                eprintln!("Warning: Failed to fetch threads for deletion: {}", e);
-            }
+
+            // Strip paperclip markers (these threads are preserved for human review)
+            strip_paperclips(&threads);
+        }
+        Err(e) => {
+            eprintln!("Warning: Failed to fetch threads for cleanup: {}", e);
         }
     }
 

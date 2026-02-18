@@ -242,4 +242,49 @@ mod tests {
             other => panic!("Expected FixCiFailures, got {:?}", other),
         }
     }
+
+    #[test]
+    fn analyze_ignores_paperclip_thread() {
+        // A paperclip thread should not be treated as actionable
+        let checks = ChecksSummary {
+            checks: vec![make_check("build", CheckStatus::Pass)],
+        };
+        let threads = vec![make_thread(
+            "T1",
+            false,
+            vec![make_comment("reviewer", ":paperclip: For human review only")],
+        )];
+
+        match analyze_pr(&checks, threads) {
+            NextAction::PrReady => {}
+            other => panic!("Expected PrReady, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn analyze_ignores_paperclip_but_sees_normal_threads() {
+        let checks = ChecksSummary {
+            checks: vec![make_check("build", CheckStatus::Pass)],
+        };
+        let threads = vec![
+            make_thread(
+                "T1",
+                false,
+                vec![make_comment("reviewer", ":paperclip: Sticky note for human")],
+            ),
+            make_thread(
+                "T2",
+                false,
+                vec![make_comment("reviewer", "Please fix this")],
+            ),
+        ];
+
+        match analyze_pr(&checks, threads) {
+            NextAction::RespondToComments { threads, .. } => {
+                assert_eq!(threads.len(), 1);
+                assert_eq!(threads[0].thread.id, "T2");
+            }
+            other => panic!("Expected RespondToComments, got {:?}", other),
+        }
+    }
 }

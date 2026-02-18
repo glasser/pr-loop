@@ -68,10 +68,13 @@ pub fn capture_snapshot(
         .map(|c| c.name.clone())
         .collect();
 
-    // Fetch threads
-    let threads = threads_client
+    // Fetch threads, excluding paperclip threads (preserved for human review)
+    let threads: Vec<_> = threads_client
         .fetch_threads(owner, repo, pr_number)
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|t| !t.has_paperclip())
+        .collect();
 
     // All unresolved threads (regardless of who commented last)
     let unresolved_thread_ids: HashSet<String> = threads
@@ -510,5 +513,84 @@ mod tests {
             pending_check_names: pending,
         };
         assert!(!snapshot.is_happy());
+    }
+
+    #[test]
+    fn snapshot_ignores_paperclip_threads() {
+        let checks_client = TestChecksClient {
+            checks: vec![make_check("build", CheckStatus::Pass)],
+        };
+        // An unresolved thread with a paperclip should be ignored
+        let threads_client = TestThreadsClient {
+            threads: vec![ReviewThread {
+                id: "T1".to_string(),
+                is_resolved: false,
+                path: Some("test.rs".to_string()),
+                line: Some(1),
+                comments: vec![ThreadComment {
+                    id: "C1".to_string(),
+                    author: "reviewer".to_string(),
+                    body: ":paperclip: This is for human review".to_string(),
+                }],
+            }],
+        };
+
+        let snapshot = capture_snapshot(
+            &checks_client,
+            &threads_client,
+            "owner",
+            "repo",
+            1,
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        // Paperclip thread should not appear in either actionable or unresolved
+        assert!(snapshot.actionable_thread_ids.is_empty());
+        assert!(snapshot.unresolved_thread_ids.is_empty());
+        assert!(snapshot.is_happy());
+    }
+
+    #[test]
+    fn snapshot_ignores_paperclip_thread_where_only_one_comment_has_marker() {
+        let checks_client = TestChecksClient {
+            checks: vec![make_check("build", CheckStatus::Pass)],
+        };
+        // Thread has paperclip in only one comment but entire thread is excluded
+        let threads_client = TestThreadsClient {
+            threads: vec![ReviewThread {
+                id: "T1".to_string(),
+                is_resolved: false,
+                path: Some("test.rs".to_string()),
+                line: Some(1),
+                comments: vec![
+                    ThreadComment {
+                        id: "C1".to_string(),
+                        author: "reviewer".to_string(),
+                        body: "Please fix this".to_string(),
+                    },
+                    ThreadComment {
+                        id: "C2".to_string(),
+                        author: "reviewer".to_string(),
+                        body: ":paperclip: But note this for human review".to_string(),
+                    },
+                ],
+            }],
+        };
+
+        let snapshot = capture_snapshot(
+            &checks_client,
+            &threads_client,
+            "owner",
+            "repo",
+            1,
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        assert!(snapshot.actionable_thread_ids.is_empty());
+        assert!(snapshot.unresolved_thread_ids.is_empty());
     }
 }

@@ -16,6 +16,7 @@ pub struct ReplyResult {
 pub trait ReplyClient {
     fn post_reply(&self, thread_id: &str, body: &str) -> Result<ReplyResult>;
     fn delete_comment(&self, comment_id: &str) -> Result<()>;
+    fn update_comment(&self, comment_id: &str, body: &str) -> Result<()>;
 }
 
 /// Real client that uses `gh api graphql`.
@@ -28,6 +29,10 @@ impl ReplyClient for RealReplyClient {
 
     fn delete_comment(&self, comment_id: &str) -> Result<()> {
         delete_comment_graphql(comment_id)
+    }
+
+    fn update_comment(&self, comment_id: &str, body: &str) -> Result<()> {
+        update_comment_graphql(comment_id, body)
     }
 }
 
@@ -131,6 +136,35 @@ fn delete_comment_graphql(comment_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// GraphQL mutation for updating a comment (loaded from graphql/operation/).
+const UPDATE_COMMENT_MUTATION: &str = include_str!("../graphql/operation/update_comment.graphql");
+
+/// Update a PR review comment's body using GraphQL.
+fn update_comment_graphql(comment_id: &str, body: &str) -> Result<()> {
+    let mutation = UPDATE_COMMENT_MUTATION;
+
+    let output = Command::new("gh")
+        .args([
+            "api",
+            "graphql",
+            "-f",
+            &format!("query={}", mutation),
+            "-f",
+            &format!("commentId={}", comment_id),
+            "-f",
+            &format!("body={}", body),
+        ])
+        .output()
+        .context("Failed to run 'gh api graphql' for update comment")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("GraphQL mutation failed: {}", stderr.trim());
+    }
+
+    Ok(())
+}
+
 /// Format the message with the Claude marker prefix.
 pub fn format_claude_message(message: &str) -> String {
     format!("{} {}", CLAUDE_MARKER, message)
@@ -157,6 +191,14 @@ mod tests {
         }
 
         fn delete_comment(&self, _comment_id: &str) -> Result<()> {
+            if self.should_fail {
+                anyhow::bail!("Test failure")
+            } else {
+                Ok(())
+            }
+        }
+
+        fn update_comment(&self, _comment_id: &str, _body: &str) -> Result<()> {
             if self.should_fail {
                 anyhow::bail!("Test failure")
             } else {
