@@ -14,7 +14,7 @@ Mark a draft PR as ready for human review. This validates the PR is in a good st
 Run `pr-loop ready` to (add `--preserve-claude-threads` if user passed "preserve" as an argument to this skill):
 
 1. Verify the PR is currently in draft mode
-2. Verify the PR has exactly one commit (fail with squash instructions if not)
+2. Verify the PR has exactly one commit. If not, follow the squash instructions in the output, force-push, then run `pr-loop --wait-until-actionable-or-happy --maintain-status` to wait for CI, and finally run `pr-loop ready` again
 3. Validate that:
    - All CI checks are passing (no failures or pending)
    - All review threads are resolved (not just responded to)
@@ -61,11 +61,27 @@ When iterating with an LLM, you may end up with review threads where all comment
 
 By default, all comments in resolved threads where every comment starts with the Claude marker will be deleted. Threads with any non-Claude comments are always preserved.
 
+## If Squashing Is Needed
+
+If `pr-loop ready` fails because the PR has multiple commits, follow the squash instructions in the output, then:
+
+1. Force-push the squashed branch: `git push --force-with-lease`
+2. Wait for CI by running exactly: `pr-loop --wait-until-actionable-or-happy --maintain-status`
+3. Once that exits successfully (meaning CI passed), run `pr-loop ready` again
+
+**CRITICAL**: You MUST use `--wait-until-actionable-or-happy` (NOT `--wait-until-actionable`). The `--wait-until-actionable` flag will NOT exit when CI passes — it only exits when there are comments or failures to address. The `-or-happy` variant is what exits successfully when CI is green with no comments.
+
 ## If CI Is Still Pending
 
-If `pr-loop ready` fails because CI checks are still pending, use `/pr-loop-unattended` to wait for CI to complete. That skill has built-in waiting functionality that polls for CI status. Once CI passes, run `pr-loop ready` again.
+If `pr-loop ready` fails because CI checks are still pending, wait for CI by running exactly:
 
-Do NOT use `sleep` to wait for CI - always use `/pr-loop-unattended` which handles the waiting properly.
+```
+pr-loop --wait-until-actionable-or-happy --maintain-status
+```
+
+Once that exits successfully, run `pr-loop ready` again.
+
+**CRITICAL**: Use `--wait-until-actionable-or-happy` (NOT `--wait-until-actionable`). Only the `-or-happy` variant exits successfully when CI passes with no comments. Do NOT use `sleep` to wait for CI either.
 
 ## Important Notes
 

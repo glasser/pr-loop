@@ -703,6 +703,12 @@ fn run_ready_command(
             eprintln!("  - Summarize what the PR accomplishes, not the individual commits");
             eprintln!("  - After squashing, update the PR description to match (keep any status blocks");
             eprintln!("    and follow any PR template in the repo)");
+            eprintln!();
+            eprintln!("After squashing and force-pushing, wait for CI to pass by running:");
+            eprintln!("  pr-loop --wait-until-actionable-or-happy --maintain-status");
+            eprintln!();
+            eprintln!("NOTE: You MUST use --wait-until-actionable-or-happy (not --wait-until-actionable)");
+            eprintln!("so that the command exits successfully when CI passes. Then run `pr-loop ready` again.");
             std::process::exit(1);
         }
         Err(e) => {
