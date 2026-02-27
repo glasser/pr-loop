@@ -16,7 +16,7 @@ mod threads;
 mod wait;
 
 use analysis::{analyze_pr, NextAction};
-use checks::{get_checks_summary, ChecksSummary, RealChecksClient};
+use checks::{get_checks_summary, CheckStatus, ChecksSummary, RealChecksClient};
 use circleci::{
     get_failed_step_logs, is_circleci_url, parse_circleci_url, FailedStepLog, RealCircleCiClient,
 };
@@ -164,6 +164,15 @@ fn main() {
 
         Some(Command::CleanThreads) => {
             run_clean_threads_command(&pr_context);
+        }
+
+        Some(Command::Checks) => {
+            run_checks_command(
+                &creds,
+                &pr_context,
+                &cli.include_checks,
+                &cli.exclude_checks,
+            );
         }
 
         None => {
@@ -649,6 +658,149 @@ fn run_clean_threads_command(pr_context: &PrContext) {
         Err(e) => {
             eprintln!("Error: Failed to fetch threads: {}", e);
             std::process::exit(1);
+        }
+    }
+}
+
+/// Run the `checks` subcommand: show CI check status and failure logs.
+fn run_checks_command(
+    creds: &Credentials,
+    pr_context: &PrContext,
+    include_checks: &[String],
+    exclude_checks: &[String],
+) {
+    let checks_client = RealChecksClient;
+
+    let checks_summary = match get_checks_summary(
+        &checks_client,
+        &pr_context.owner,
+        &pr_context.repo,
+        pr_context.pr_number,
+        include_checks,
+        exclude_checks,
+    ) {
+        Ok(summary) => summary,
+        Err(e) => {
+            eprintln!("Error: Failed to fetch checks: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    println!(
+        "# CI Checks: {}/{}#{}",
+        pr_context.owner, pr_context.repo, pr_context.pr_number
+    );
+    println!();
+
+    if checks_summary.checks.is_empty() {
+        println!("No checks found.");
+        return;
+    }
+
+    // Group checks by status for display
+    let passed: Vec<_> = checks_summary
+        .checks
+        .iter()
+        .filter(|c| c.status == CheckStatus::Pass)
+        .collect();
+    let failed = checks_summary.failed();
+    let pending = checks_summary.pending();
+    let skipped: Vec<_> = checks_summary
+        .checks
+        .iter()
+        .filter(|c| c.status == CheckStatus::Skipping)
+        .collect();
+    let cancelled: Vec<_> = checks_summary
+        .checks
+        .iter()
+        .filter(|c| c.status == CheckStatus::Cancelled)
+        .collect();
+
+    if !failed.is_empty() {
+        println!(
+            "## Failed ({})",
+            failed.len()
+        );
+        for check in &failed {
+            println!("  ✗ {}", check.name);
+        }
+        println!();
+    }
+
+    if !pending.is_empty() {
+        println!(
+            "## Pending ({})",
+            pending.len()
+        );
+        for check in &pending {
+            println!("  ○ {}", check.name);
+        }
+        println!();
+    }
+
+    if !passed.is_empty() {
+        println!(
+            "## Passed ({})",
+            passed.len()
+        );
+        for check in &passed {
+            println!("  ✓ {}", check.name);
+        }
+        println!();
+    }
+
+    if !skipped.is_empty() {
+        println!(
+            "## Skipped ({})",
+            skipped.len()
+        );
+        for check in &skipped {
+            println!("  ⊘ {}", check.name);
+        }
+        println!();
+    }
+
+    if !cancelled.is_empty() {
+        println!(
+            "## Cancelled ({})",
+            cancelled.len()
+        );
+        for check in &cancelled {
+            println!("  ⊘ {}", check.name);
+        }
+        println!();
+    }
+
+    // Fetch and display CircleCI logs for failures
+    if !failed.is_empty() {
+        let circleci_logs = if creds.circleci_token.is_some() {
+            fetch_circleci_logs(creds, &checks_summary)
+        } else {
+            vec![]
+        };
+
+        if !circleci_logs.is_empty() {
+            println!("## CI Failure Details");
+            for log in &circleci_logs {
+                println!();
+                println!("### Job: {} / Step: {}", log.job_name, log.step_name);
+                if !log.error.is_empty() {
+                    println!();
+                    println!("**Stderr:**");
+                    println!("```");
+                    let error_truncated = truncate_log(&log.error, 2000);
+                    println!("{}", error_truncated);
+                    println!("```");
+                }
+                if !log.output.is_empty() {
+                    println!();
+                    println!("**Stdout (last lines):**");
+                    println!("```");
+                    let output_truncated = truncate_log_tail(&log.output, 2000);
+                    println!("{}", output_truncated);
+                    println!("```");
+                }
+            }
         }
     }
 }

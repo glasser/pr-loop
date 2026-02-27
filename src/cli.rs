@@ -89,6 +89,10 @@ pub enum Command {
     /// These are typically noise from the LLM iteration process.
     /// Unlike `ready`, this does not validate PR state or mark it as non-draft.
     CleanThreads,
+
+    /// Show CI check status and failure logs.
+    /// Does not modify the PR or post comments. Works on any PR (draft or not).
+    Checks,
 }
 
 #[cfg(test)]
@@ -319,6 +323,20 @@ mod tests {
         assert_eq!(cli.repo, Some("owner/repo".to_string()));
         assert_eq!(cli.pr, Some(123));
         assert!(matches!(cli.command, Some(Command::CleanThreads)));
+    }
+
+    #[test]
+    fn parse_checks_command() {
+        let cli = Cli::parse_from(["pr-loop", "checks"]);
+        assert!(matches!(cli.command, Some(Command::Checks)));
+    }
+
+    #[test]
+    fn parse_checks_command_with_global_args() {
+        let cli = Cli::parse_from(["pr-loop", "--repo", "owner/repo", "--pr", "123", "checks"]);
+        assert_eq!(cli.repo, Some("owner/repo".to_string()));
+        assert_eq!(cli.pr, Some(123));
+        assert!(matches!(cli.command, Some(Command::Checks)));
     }
 
     #[test]
