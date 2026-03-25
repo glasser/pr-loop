@@ -24,7 +24,10 @@ use clap::Parser;
 use cli::{Cli, Command};
 use credentials::{CredentialProvider, Credentials, RealCredentialProvider};
 use git::RealGitClient;
-use github::{resolve_pr_context, PrContext, RealGitHubClient};
+use github::{
+    resolve_pr_context, MergeableClient, MergeableStatus, PrContext, RealGitHubClient,
+    RealMergeableClient,
+};
 use pr::{has_status_block, remove_status_block, update_body_with_status, PrClient, RealPrClient};
 use reply::{format_claude_message, RealReplyClient, ReplyClient};
 use threads::{
@@ -152,13 +155,14 @@ fn main() {
             }
         }
 
-        Some(Command::Ready { preserve_claude_threads }) => {
+        Some(Command::Ready { preserve_claude_threads, reviewer }) => {
             run_ready_command(
                 &pr_client,
                 &pr_context,
                 &cli.include_checks,
                 &cli.exclude_checks,
                 preserve_claude_threads,
+                reviewer.as_deref(),
             );
         }
 
@@ -179,6 +183,7 @@ fn main() {
             let checks_client = RealChecksClient;
             let threads_client = RealThreadsClient;
             let git_client = RealGitClient;
+            let mergeable_client = RealMergeableClient;
 
             // If --wait-until-actionable, poll until something needs attention
             if cli.wait_until_actionable {
@@ -284,7 +289,25 @@ fn main() {
                 vec![]
             };
 
-            print_recommendation(&pr_context, &checks_summary, &action, &circleci_logs);
+            let mergeable_status = match mergeable_client.fetch_mergeable_status(
+                &pr_context.owner,
+                &pr_context.repo,
+                pr_context.pr_number,
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Warning: Failed to fetch merge conflict status: {}", e);
+                    MergeableStatus::Unknown
+                }
+            };
+
+            print_recommendation(
+                &pr_context,
+                &checks_summary,
+                &action,
+                &circleci_logs,
+                &mergeable_status,
+            );
         }
     }
 }
@@ -325,12 +348,18 @@ fn print_recommendation(
     checks: &ChecksSummary,
     action: &NextAction,
     circleci_logs: &[FailedStepLog],
+    mergeable_status: &MergeableStatus,
 ) {
     println!(
         "# PR Analysis: {}/{}#{}",
         pr_context.owner, pr_context.repo, pr_context.pr_number
     );
     println!();
+
+    if *mergeable_status == MergeableStatus::Conflicting {
+        println!("⚠ **MERGE CONFLICTS**: This PR has merge conflicts that must be resolved.");
+        println!();
+    }
 
     match action {
         NextAction::RespondToComments {
@@ -401,6 +430,13 @@ fn print_recommendation(
             );
             for name in failed_check_names {
                 println!("  ✗ {}", name);
+            }
+
+            if *mergeable_status == MergeableStatus::Conflicting {
+                println!();
+                println!("⚠ This PR has merge conflicts. Consider rebasing to resolve conflicts");
+                println!("  before investigating CI failures — some failures may be caused by the");
+                println!("  conflicts, and CI will re-run after rebasing anyway.");
             }
 
             // Show CircleCI logs if available
@@ -670,6 +706,7 @@ fn run_checks_command(
     exclude_checks: &[String],
 ) {
     let checks_client = RealChecksClient;
+    let mergeable_client = RealMergeableClient;
 
     let checks_summary = match get_checks_summary(
         &checks_client,
@@ -686,11 +723,28 @@ fn run_checks_command(
         }
     };
 
+    let mergeable_status = match mergeable_client.fetch_mergeable_status(
+        &pr_context.owner,
+        &pr_context.repo,
+        pr_context.pr_number,
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Warning: Failed to fetch merge conflict status: {}", e);
+            MergeableStatus::Unknown
+        }
+    };
+
     println!(
         "# CI Checks: {}/{}#{}",
         pr_context.owner, pr_context.repo, pr_context.pr_number
     );
     println!();
+
+    if mergeable_status == MergeableStatus::Conflicting {
+        println!("⚠ **MERGE CONFLICTS**: This PR has merge conflicts that must be resolved.");
+        println!();
+    }
 
     if checks_summary.checks.is_empty() {
         println!("No checks found.");
@@ -725,6 +779,12 @@ fn run_checks_command(
             println!("  ✗ {}", check.name);
         }
         println!();
+        if mergeable_status == MergeableStatus::Conflicting {
+            println!("⚠ This PR has merge conflicts. Consider rebasing to resolve conflicts");
+            println!("  before investigating CI failures — some failures may be caused by the");
+            println!("  conflicts, and CI will re-run after rebasing anyway.");
+            println!();
+        }
     }
 
     if !pending.is_empty() {
@@ -812,6 +872,7 @@ fn run_ready_command(
     include_checks: &[String],
     exclude_checks: &[String],
     preserve_claude_threads: bool,
+    reviewer: Option<&str>,
 ) {
     let checks_client = RealChecksClient;
     let threads_client = RealThreadsClient;
@@ -981,12 +1042,27 @@ fn run_ready_command(
     match pr_client.mark_ready(&pr_context.owner, &pr_context.repo, pr_context.pr_number) {
         Ok(()) => {
             println!("✓ PR marked as ready for review");
-            println!();
-            println!("🎉 PR is now ready for human review!");
         }
         Err(e) => {
             eprintln!("Error: Failed to mark PR as ready: {}", e);
             std::process::exit(1);
         }
     }
+
+    // Step 7 (optional): Request review from specified reviewer
+    if let Some(username) = reviewer {
+        println!("Requesting review from @{}...", username);
+        match pr_client.add_reviewer(&pr_context.owner, &pr_context.repo, pr_context.pr_number, username) {
+            Ok(()) => {
+                println!("✓ Review requested from @{}", username);
+            }
+            Err(e) => {
+                eprintln!("Error: Failed to request review from @{}: {}", username, e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    println!();
+    println!("🎉 PR is now ready for human review!");
 }

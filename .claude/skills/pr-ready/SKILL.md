@@ -1,8 +1,7 @@
 ---
 name: pr-ready
 description: Mark a draft PR as ready for review after validating it's in a good state
-disable-model-invocation: true
-argument-hint: "[preserve]"
+argument-hint: "[preserve] [reviewer name]"
 ---
 
 # PR Ready
@@ -11,7 +10,9 @@ Mark a draft PR as ready for human review. This validates the PR is in a good st
 
 ## Instructions
 
-Run `pr-loop ready` to (add `--preserve-claude-threads` if user passed "preserve" as an argument to this skill):
+If the user mentioned a person's name as a reviewer, use GitHub search (e.g., `gh api "search/users?q=FULLNAME+in:name"` or check the repo's contributors via `gh api repos/OWNER/REPO/contributors`) to determine their GitHub username. Tell the user who you've resolved the name to (e.g., "I'll request a review from @githubusername (Full Name)") before proceeding. Then pass `--reviewer <username>` to `pr-loop ready`.
+
+Run `pr-loop ready` (add `--preserve-claude-threads` if user passed "preserve", add `--reviewer <username>` if a reviewer was identified):
 
 1. Verify the PR is currently in draft mode
 2. Verify the PR has exactly one commit. If not, follow the squash instructions in the output, force-push, then run `pr-loop --wait-until-actionable-or-happy --maintain-status` to wait for CI, and finally run `pr-loop ready` again

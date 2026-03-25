@@ -25,6 +25,9 @@ pub trait PrClient {
 
     /// Get the number of commits in the PR.
     fn get_commit_count(&self, owner: &str, repo: &str, pr_number: u64) -> Result<usize>;
+
+    /// Request a review from a GitHub user.
+    fn add_reviewer(&self, owner: &str, repo: &str, pr_number: u64, reviewer: &str) -> Result<()>;
 }
 
 /// Real PR client that uses the `gh` CLI.
@@ -129,6 +132,28 @@ impl PrClient for RealPrClient {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             anyhow::bail!("Failed to mark PR as ready: {}", stderr.trim());
+        }
+
+        Ok(())
+    }
+
+    fn add_reviewer(&self, owner: &str, repo: &str, pr_number: u64, reviewer: &str) -> Result<()> {
+        let output = Command::new("gh")
+            .args([
+                "pr",
+                "edit",
+                &pr_number.to_string(),
+                "--repo",
+                &format!("{}/{}", owner, repo),
+                "--add-reviewer",
+                reviewer,
+            ])
+            .output()
+            .context("Failed to run 'gh pr edit'")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("Failed to add reviewer: {}", stderr.trim());
         }
 
         Ok(())
@@ -287,6 +312,10 @@ mod tests {
 
         fn get_commit_count(&self, _owner: &str, _repo: &str, _pr_number: u64) -> Result<usize> {
             Ok(self.commit_count)
+        }
+
+        fn add_reviewer(&self, _owner: &str, _repo: &str, _pr_number: u64, _reviewer: &str) -> Result<()> {
+            Ok(())
         }
     }
 

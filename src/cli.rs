@@ -83,6 +83,10 @@ pub enum Command {
         /// By default, these are deleted as they are typically noise from the LLM iteration process.
         #[arg(long)]
         preserve_claude_threads: bool,
+
+        /// GitHub username to request a review from after marking the PR ready.
+        #[arg(long)]
+        reviewer: Option<String>,
     },
 
     /// Delete resolved review threads where all comments are from Claude.
@@ -291,8 +295,9 @@ mod tests {
     fn parse_ready_command() {
         let cli = Cli::parse_from(["pr-loop", "ready"]);
         match cli.command {
-            Some(Command::Ready { preserve_claude_threads }) => {
+            Some(Command::Ready { preserve_claude_threads, reviewer }) => {
                 assert!(!preserve_claude_threads);
+                assert!(reviewer.is_none());
             }
             _ => panic!("Expected Ready command"),
         }
@@ -304,8 +309,9 @@ mod tests {
         assert_eq!(cli.repo, Some("owner/repo".to_string()));
         assert_eq!(cli.pr, Some(123));
         match cli.command {
-            Some(Command::Ready { preserve_claude_threads }) => {
+            Some(Command::Ready { preserve_claude_threads, reviewer }) => {
                 assert!(!preserve_claude_threads);
+                assert!(reviewer.is_none());
             }
             _ => panic!("Expected Ready command"),
         }
@@ -343,8 +349,21 @@ mod tests {
     fn parse_ready_command_with_preserve_claude_threads() {
         let cli = Cli::parse_from(["pr-loop", "ready", "--preserve-claude-threads"]);
         match cli.command {
-            Some(Command::Ready { preserve_claude_threads }) => {
+            Some(Command::Ready { preserve_claude_threads, reviewer }) => {
                 assert!(preserve_claude_threads);
+                assert!(reviewer.is_none());
+            }
+            _ => panic!("Expected Ready command"),
+        }
+    }
+
+    #[test]
+    fn parse_ready_command_with_reviewer() {
+        let cli = Cli::parse_from(["pr-loop", "ready", "--reviewer", "octocat"]);
+        match cli.command {
+            Some(Command::Ready { preserve_claude_threads, reviewer }) => {
+                assert!(!preserve_claude_threads);
+                assert_eq!(reviewer, Some("octocat".to_string()));
             }
             _ => panic!("Expected Ready command"),
         }

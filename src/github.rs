@@ -89,6 +89,77 @@ fn detect_pr_from_gh(_owner: &str, _repo: &str) -> Result<u64> {
     Ok(view.number)
 }
 
+/// Whether a PR has merge conflicts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeableStatus {
+    Mergeable,
+    Conflicting,
+    Unknown,
+}
+
+/// Trait for fetching PR mergeability, allowing test implementations.
+pub trait MergeableClient {
+    fn fetch_mergeable_status(
+        &self,
+        owner: &str,
+        repo: &str,
+        pr_number: u64,
+    ) -> Result<MergeableStatus>;
+}
+
+/// Real client that uses `gh pr view`.
+pub struct RealMergeableClient;
+
+impl MergeableClient for RealMergeableClient {
+    fn fetch_mergeable_status(
+        &self,
+        owner: &str,
+        repo: &str,
+        pr_number: u64,
+    ) -> Result<MergeableStatus> {
+        fetch_mergeable_status_from_gh(owner, repo, pr_number)
+    }
+}
+
+#[derive(Deserialize)]
+struct GhPrMergeable {
+    mergeable: String,
+}
+
+/// Fetch PR mergeability using `gh pr view --json mergeable`.
+fn fetch_mergeable_status_from_gh(
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+) -> Result<MergeableStatus> {
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "view",
+            &pr_number.to_string(),
+            "--repo",
+            &format!("{}/{}", owner, repo),
+            "--json",
+            "mergeable",
+        ])
+        .output()
+        .context("Failed to run 'gh pr view'")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Failed to fetch PR info: {}", stderr.trim());
+    }
+
+    let pr: GhPrMergeable =
+        serde_json::from_slice(&output.stdout).context("Failed to parse gh pr view output")?;
+
+    Ok(match pr.mergeable.as_str() {
+        "MERGEABLE" => MergeableStatus::Mergeable,
+        "CONFLICTING" => MergeableStatus::Conflicting,
+        _ => MergeableStatus::Unknown,
+    })
+}
+
 /// Resolve PR context from CLI args and/or auto-detection.
 pub fn resolve_pr_context(
     client: &dyn GitHubClient,
