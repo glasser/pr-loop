@@ -151,6 +151,22 @@ pub struct FailedStepLog {
     pub error: String,
 }
 
+/// A single test failure from CircleCI test metadata.
+#[derive(Debug, Clone)]
+pub struct TestFailure {
+    pub job_name: String,
+    pub classname: String,
+    pub test_name: String,
+    pub message: String,
+}
+
+/// Combined failure info from a CircleCI job.
+#[derive(Debug, Clone, Default)]
+pub struct CircleCiFailureInfo {
+    pub step_logs: Vec<FailedStepLog>,
+    pub test_failures: Vec<TestFailure>,
+}
+
 /// Trait for CircleCI API operations.
 pub trait CircleCiClient {
     /// Fetch job details from the v1.1 API.
@@ -163,6 +179,17 @@ pub trait CircleCiClient {
         task_index: u32,
         step_id: u32,
     ) -> Result<StepOutput>;
+
+    /// Fetch test failures from the v2 API test metadata endpoint.
+    fn fetch_test_failures(&self, job_info: &CircleCiJobInfo) -> Result<Vec<RawTestFailure>>;
+}
+
+/// A test failure as returned from the CircleCI API (without job_name context).
+#[derive(Debug, Clone)]
+pub struct RawTestFailure {
+    pub classname: String,
+    pub test_name: String,
+    pub message: String,
 }
 
 /// Real CircleCI client using reqwest.
@@ -199,6 +226,22 @@ struct ActionResponse {
 #[derive(Deserialize)]
 struct WorkflowsResponse {
     job_name: String,
+}
+
+// V2 API response types for test metadata
+#[derive(Deserialize)]
+struct TestsResponse {
+    items: Vec<TestItem>,
+    next_page_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TestItem {
+    classname: String,
+    name: String,
+    result: String,
+    #[serde(default)]
+    message: String,
 }
 
 impl CircleCiClient for RealCircleCiClient {
@@ -287,22 +330,74 @@ impl CircleCiClient for RealCircleCiClient {
 
         Ok(StepOutput { output, error })
     }
+
+    fn fetch_test_failures(&self, job_info: &CircleCiJobInfo) -> Result<Vec<RawTestFailure>> {
+        let client = reqwest::blocking::Client::new();
+        let mut failures = Vec::new();
+        let mut page_token: Option<String> = None;
+
+        loop {
+            let mut url = format!(
+                "https://circleci.com/api/v2/project/{}/{}/tests",
+                job_info.project_slug(),
+                job_info.job_number
+            );
+            if let Some(token) = &page_token {
+                url.push_str(&format!("?page-token={}", token));
+            }
+
+            let response = client
+                .get(&url)
+                .header("Circle-Token", &self.token)
+                .header("Accept", "application/json")
+                .send()
+                .context("Failed to send request to CircleCI tests API")?;
+
+            if response.status() == 404 {
+                // No test metadata for this job — not an error
+                return Ok(vec![]);
+            }
+            if !response.status().is_success() {
+                anyhow::bail!("CircleCI tests API error: {}", response.status());
+            }
+
+            let tests: TestsResponse = response
+                .json()
+                .context("Failed to parse CircleCI test metadata")?;
+
+            for item in tests.items {
+                if item.result == "failure" {
+                    failures.push(RawTestFailure {
+                        classname: item.classname,
+                        test_name: item.name,
+                        message: item.message,
+                    });
+                }
+            }
+
+            match tests.next_page_token {
+                Some(token) if !token.is_empty() => page_token = Some(token),
+                _ => break,
+            }
+        }
+
+        Ok(failures)
+    }
 }
 
-/// Fetch logs for failed steps in a job.
-pub fn get_failed_step_logs(
+/// Fetch failure info (step logs + test failures) for a job.
+pub fn get_job_failures(
     client: &dyn CircleCiClient,
     job_info: &CircleCiJobInfo,
-) -> Result<Vec<FailedStepLog>> {
+) -> Result<CircleCiFailureInfo> {
     let details = client.fetch_job_details(job_info)?;
 
-    let mut logs = Vec::new();
-
+    let mut step_logs = Vec::new();
     for step in &details.steps {
         for action in &step.actions {
             if action.failed {
                 let output = client.fetch_step_output(job_info, action.index, action.step)?;
-                logs.push(FailedStepLog {
+                step_logs.push(FailedStepLog {
                     job_name: details.job_name.clone(),
                     step_name: step.name.clone(),
                     output: output.output,
@@ -312,7 +407,29 @@ pub fn get_failed_step_logs(
         }
     }
 
-    Ok(logs)
+    let test_failures = match client.fetch_test_failures(job_info) {
+        Ok(raw) => raw
+            .into_iter()
+            .map(|f| TestFailure {
+                job_name: details.job_name.clone(),
+                classname: f.classname,
+                test_name: f.test_name,
+                message: f.message,
+            })
+            .collect(),
+        Err(e) => {
+            eprintln!(
+                "Warning: Failed to fetch test metadata for job {}: {}",
+                details.job_name, e
+            );
+            vec![]
+        }
+    };
+
+    Ok(CircleCiFailureInfo {
+        step_logs,
+        test_failures,
+    })
 }
 
 /// Check if a URL is a CircleCI URL.
@@ -403,6 +520,7 @@ mod tests {
     pub struct TestCircleCiClient {
         pub job_details: Option<JobDetails>,
         pub step_outputs: Vec<StepOutput>,
+        pub test_failures: Vec<RawTestFailure>,
     }
 
     impl CircleCiClient for TestCircleCiClient {
@@ -423,10 +541,14 @@ mod tests {
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("No step output configured"))
         }
+
+        fn fetch_test_failures(&self, _job_info: &CircleCiJobInfo) -> Result<Vec<RawTestFailure>> {
+            Ok(self.test_failures.clone())
+        }
     }
 
     #[test]
-    fn get_failed_step_logs_filters_failed() {
+    fn get_job_failures_filters_failed() {
         let client = TestCircleCiClient {
             job_details: Some(JobDetails {
                 job_name: "test-job".to_string(),
@@ -459,6 +581,7 @@ mod tests {
                     error: "test failed: assertion error".to_string(),
                 },
             ],
+            test_failures: vec![],
         };
 
         let job_info = CircleCiJobInfo {
@@ -468,14 +591,14 @@ mod tests {
             job_number: 123,
         };
 
-        let logs = get_failed_step_logs(&client, &job_info).unwrap();
-        assert_eq!(logs.len(), 1);
-        assert_eq!(logs[0].step_name, "Run tests");
-        assert_eq!(logs[0].error, "test failed: assertion error");
+        let info = get_job_failures(&client, &job_info).unwrap();
+        assert_eq!(info.step_logs.len(), 1);
+        assert_eq!(info.step_logs[0].step_name, "Run tests");
+        assert_eq!(info.step_logs[0].error, "test failed: assertion error");
     }
 
     #[test]
-    fn get_failed_step_logs_empty_when_all_pass() {
+    fn get_job_failures_empty_when_all_pass() {
         let client = TestCircleCiClient {
             job_details: Some(JobDetails {
                 job_name: "test-job".to_string(),
@@ -489,6 +612,7 @@ mod tests {
                 }],
             }),
             step_outputs: vec![],
+            test_failures: vec![],
         };
 
         let job_info = CircleCiJobInfo {
@@ -498,7 +622,57 @@ mod tests {
             job_number: 123,
         };
 
-        let logs = get_failed_step_logs(&client, &job_info).unwrap();
-        assert!(logs.is_empty());
+        let info = get_job_failures(&client, &job_info).unwrap();
+        assert!(info.step_logs.is_empty());
+        assert!(info.test_failures.is_empty());
+    }
+
+    #[test]
+    fn get_job_failures_includes_test_failures() {
+        let client = TestCircleCiClient {
+            job_details: Some(JobDetails {
+                job_name: "test-job".to_string(),
+                steps: vec![JobStep {
+                    name: "Run tests".to_string(),
+                    actions: vec![StepAction {
+                        index: 0,
+                        step: 0,
+                        failed: true,
+                    }],
+                }],
+            }),
+            step_outputs: vec![StepOutput {
+                output: "test output".to_string(),
+                error: "exit code 1".to_string(),
+            }],
+            test_failures: vec![
+                RawTestFailure {
+                    classname: "com.example.MyTest".to_string(),
+                    test_name: "should work".to_string(),
+                    message: "expected true but was false".to_string(),
+                },
+                RawTestFailure {
+                    classname: "com.example.OtherTest".to_string(),
+                    test_name: "should also work".to_string(),
+                    message: "timeout".to_string(),
+                },
+            ],
+        };
+
+        let job_info = CircleCiJobInfo {
+            vcs: "gh".to_string(),
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+            job_number: 123,
+        };
+
+        let info = get_job_failures(&client, &job_info).unwrap();
+        assert_eq!(info.step_logs.len(), 1);
+        assert_eq!(info.test_failures.len(), 2);
+        assert_eq!(info.test_failures[0].job_name, "test-job");
+        assert_eq!(info.test_failures[0].classname, "com.example.MyTest");
+        assert_eq!(info.test_failures[0].test_name, "should work");
+        assert_eq!(info.test_failures[0].message, "expected true but was false");
+        assert_eq!(info.test_failures[1].classname, "com.example.OtherTest");
     }
 }

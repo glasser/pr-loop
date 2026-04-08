@@ -18,7 +18,8 @@ mod wait;
 use analysis::{analyze_pr, NextAction};
 use checks::{get_checks_summary, CheckStatus, ChecksSummary, RealChecksClient};
 use circleci::{
-    get_failed_step_logs, is_circleci_url, parse_circleci_url, FailedStepLog, RealCircleCiClient,
+    get_job_failures, is_circleci_url, parse_circleci_url, CircleCiFailureInfo, FailedStepLog,
+    RealCircleCiClient,
 };
 use clap::Parser;
 use cli::{Cli, Command};
@@ -283,10 +284,10 @@ fn main() {
             let action = analyze_pr(&checks_summary, threads);
 
             // If there are CI failures and we have a CircleCI token, fetch logs
-            let circleci_logs = if creds.circleci_token.is_some() {
-                fetch_circleci_logs(&creds, &checks_summary)
+            let circleci_info = if creds.circleci_token.is_some() {
+                fetch_circleci_failure_info(&creds, &checks_summary)
             } else {
-                vec![]
+                CircleCiFailureInfo::default()
             };
 
             let mergeable_status = match mergeable_client.fetch_mergeable_status(
@@ -305,29 +306,32 @@ fn main() {
                 &pr_context,
                 &checks_summary,
                 &action,
-                &circleci_logs,
+                &circleci_info,
                 &mergeable_status,
             );
         }
     }
 }
 
-/// Fetch CircleCI logs for failed checks that have CircleCI URLs.
-fn fetch_circleci_logs(creds: &Credentials, checks: &ChecksSummary) -> Vec<FailedStepLog> {
+/// Fetch CircleCI failure info (logs + test failures) for failed checks.
+fn fetch_circleci_failure_info(creds: &Credentials, checks: &ChecksSummary) -> CircleCiFailureInfo {
     let token = match &creds.circleci_token {
         Some(t) => t,
-        None => return vec![],
+        None => return CircleCiFailureInfo::default(),
     };
 
     let client = RealCircleCiClient::new(token.clone());
-    let mut all_logs = Vec::new();
+    let mut combined = CircleCiFailureInfo::default();
 
     for check in checks.failed() {
         if let Some(url) = &check.url {
             if is_circleci_url(url) {
                 if let Some(job_info) = parse_circleci_url(url) {
-                    match get_failed_step_logs(&client, &job_info) {
-                        Ok(logs) => all_logs.extend(logs),
+                    match get_job_failures(&client, &job_info) {
+                        Ok(info) => {
+                            combined.step_logs.extend(info.step_logs);
+                            combined.test_failures.extend(info.test_failures);
+                        }
                         Err(e) => {
                             eprintln!(
                                 "Warning: Failed to fetch CircleCI logs for {}: {}",
@@ -340,14 +344,14 @@ fn fetch_circleci_logs(creds: &Credentials, checks: &ChecksSummary) -> Vec<Faile
         }
     }
 
-    all_logs
+    combined
 }
 
 fn print_recommendation(
     pr_context: &github::PrContext,
     checks: &ChecksSummary,
     action: &NextAction,
-    circleci_logs: &[FailedStepLog],
+    circleci_info: &CircleCiFailureInfo,
     mergeable_status: &MergeableStatus,
 ) {
     println!(
@@ -439,41 +443,30 @@ fn print_recommendation(
                 println!("  conflicts, and CI will re-run after rebasing anyway.");
             }
 
-            // Show CircleCI logs if available
-            if !circleci_logs.is_empty() {
+            // Show CircleCI test failures if available (structured, most useful)
+            if !circleci_info.test_failures.is_empty() {
                 println!();
-                println!("## CI Failure Details");
-                for log in circleci_logs {
-                    println!();
-                    println!("### Job: {} / Step: {}", log.job_name, log.step_name);
-                    if !log.error.is_empty() {
-                        println!();
-                        println!("**Stderr:**");
-                        println!("```");
-                        // Truncate long output
-                        let error_truncated = truncate_log(&log.error, 2000);
-                        println!("{}", error_truncated);
-                        println!("```");
-                    }
-                    if !log.output.is_empty() {
-                        println!();
-                        println!("**Stdout (last lines):**");
-                        println!("```");
-                        // Show last part of stdout (often contains the actual error)
-                        let output_truncated = truncate_log_tail(&log.output, 2000);
-                        println!("{}", output_truncated);
-                        println!("```");
-                    }
-                }
+                println!("## CI Test Failures");
+                print_test_failures(&circleci_info.test_failures);
+            }
+
+            // Show CircleCI step logs if available
+            if !circleci_info.step_logs.is_empty() {
+                println!();
+                println!("## CI Failure Logs");
+                print_step_logs(&circleci_info.step_logs);
                 println!();
                 println!("Analyze the errors above and push fixes to resolve them.");
-            } else {
+            } else if circleci_info.test_failures.is_empty() {
                 println!();
                 println!("Use the CircleCI MCP server to investigate the failures:");
                 println!("  - List recent pipelines for this project");
                 println!("  - Get job details and logs for the failed workflow");
                 println!();
                 println!("Then push fixes to resolve the issues.");
+            } else {
+                println!();
+                println!("Analyze the test failures above and push fixes to resolve them.");
             }
         }
 
@@ -524,6 +517,70 @@ fn print_newer_comments(comments: &[threads::ThreadComment], thread_id: &str) {
             println!("> {}", line);
         }
         println!();
+    }
+}
+
+/// Print structured test failures, grouped by job name.
+fn print_test_failures(failures: &[circleci::TestFailure]) {
+    println!();
+    println!(
+        "{} test failure{}:",
+        failures.len(),
+        if failures.len() == 1 { "" } else { "s" }
+    );
+
+    // Group by job name, preserving order of first appearance
+    let mut job_order: Vec<&str> = Vec::new();
+    let mut by_job: std::collections::HashMap<&str, Vec<&circleci::TestFailure>> =
+        std::collections::HashMap::new();
+    for failure in failures {
+        let entry = by_job.entry(failure.job_name.as_str()).or_default();
+        if entry.is_empty() {
+            job_order.push(&failure.job_name);
+        }
+        entry.push(failure);
+    }
+
+    for job_name in &job_order {
+        println!();
+        println!("### Job: {}", job_name);
+        for failure in &by_job[job_name] {
+            println!();
+            println!("- **{}** / {}", failure.classname, failure.test_name);
+            if !failure.message.is_empty() {
+                println!("  ```");
+                // Truncate long messages (stack traces can be very long)
+                let msg = truncate_log(&failure.message, 500);
+                for line in msg.lines() {
+                    println!("  {}", line);
+                }
+                println!("  ```");
+            }
+        }
+    }
+}
+
+/// Print step log details.
+fn print_step_logs(logs: &[FailedStepLog]) {
+    for log in logs {
+        println!();
+        println!("### Job: {} / Step: {}", log.job_name, log.step_name);
+        if !log.error.is_empty() {
+            println!();
+            println!("**Stderr:**");
+            println!("```");
+            let error_truncated = truncate_log(&log.error, 2000);
+            println!("{}", error_truncated);
+            println!("```");
+        }
+        if !log.output.is_empty() {
+            println!();
+            println!("**Stdout (last lines):**");
+            println!("```");
+            let output_truncated = truncate_log_tail(&log.output, 2000);
+            println!("{}", output_truncated);
+            println!("```");
+        }
     }
 }
 
@@ -831,36 +888,22 @@ fn run_checks_command(
         println!();
     }
 
-    // Fetch and display CircleCI logs for failures
+    // Fetch and display CircleCI failure info
     if !failed.is_empty() {
-        let circleci_logs = if creds.circleci_token.is_some() {
-            fetch_circleci_logs(creds, &checks_summary)
+        let circleci_info = if creds.circleci_token.is_some() {
+            fetch_circleci_failure_info(creds, &checks_summary)
         } else {
-            vec![]
+            CircleCiFailureInfo::default()
         };
 
-        if !circleci_logs.is_empty() {
-            println!("## CI Failure Details");
-            for log in &circleci_logs {
-                println!();
-                println!("### Job: {} / Step: {}", log.job_name, log.step_name);
-                if !log.error.is_empty() {
-                    println!();
-                    println!("**Stderr:**");
-                    println!("```");
-                    let error_truncated = truncate_log(&log.error, 2000);
-                    println!("{}", error_truncated);
-                    println!("```");
-                }
-                if !log.output.is_empty() {
-                    println!();
-                    println!("**Stdout (last lines):**");
-                    println!("```");
-                    let output_truncated = truncate_log_tail(&log.output, 2000);
-                    println!("{}", output_truncated);
-                    println!("```");
-                }
-            }
+        if !circleci_info.test_failures.is_empty() {
+            println!("## CI Test Failures");
+            print_test_failures(&circleci_info.test_failures);
+        }
+
+        if !circleci_info.step_logs.is_empty() {
+            println!("## CI Failure Logs");
+            print_step_logs(&circleci_info.step_logs);
         }
     }
 }
