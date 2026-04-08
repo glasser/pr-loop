@@ -117,6 +117,39 @@ pub enum WaitResult {
     Timeout,
 }
 
+/// Summarized PR status for printing during wait polling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WaitStatus {
+    ci_happy: bool,
+    has_unresolved_threads: bool,
+}
+
+impl WaitStatus {
+    fn from_snapshot(snapshot: &PrSnapshot) -> Self {
+        Self {
+            ci_happy: snapshot.is_ci_happy(),
+            has_unresolved_threads: !snapshot.unresolved_thread_ids.is_empty(),
+        }
+    }
+
+    fn print(&self) {
+        match (self.ci_happy, self.has_unresolved_threads) {
+            (true, true) => {
+                eprintln!("✓ CI checks all passing, but there are unresolved review comments.");
+            }
+            (true, false) => {
+                eprintln!("✓ CI checks all passing. Waiting for review activity...");
+            }
+            (false, true) => {
+                eprintln!("○ CI checks running; there are also unresolved review comments.");
+            }
+            (false, false) => {
+                eprintln!("○ CI checks running. Waiting for review activity...");
+            }
+        }
+    }
+}
+
 /// Wait until PR becomes actionable or timeout is reached.
 pub fn wait_until_actionable(
     checks_client: &dyn ChecksClient,
@@ -153,6 +186,9 @@ pub fn wait_until_actionable(
         timeout_secs, poll_interval_secs
     );
 
+    let mut prev_status = WaitStatus::from_snapshot(&snapshot);
+    prev_status.print();
+
     loop {
         if start.elapsed() >= timeout {
             return Ok(WaitResult::Timeout);
@@ -172,6 +208,12 @@ pub fn wait_until_actionable(
 
         if snapshot.is_actionable() {
             return Ok(WaitResult::Actionable);
+        }
+
+        let status = WaitStatus::from_snapshot(&snapshot);
+        if status != prev_status {
+            status.print();
+            prev_status = status;
         }
     }
 }
