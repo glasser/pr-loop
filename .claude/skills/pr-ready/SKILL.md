@@ -1,7 +1,7 @@
 ---
 name: pr-ready
 description: Mark a draft PR as ready for review after validating it's in a good state
-argument-hint: "[preserve] [reviewer name]"
+argument-hint: "[preserve] [reviewer name(s)]"
 ---
 
 # PR Ready
@@ -10,7 +10,7 @@ Mark a draft PR as ready for human review. This validates the PR is in a good st
 
 ## Instructions
 
-If the user mentioned a person's name as a reviewer, use GitHub search (e.g., `gh api "search/users?q=FULLNAME+in:name"` or check the repo's contributors via `gh api repos/OWNER/REPO/contributors`) to determine their GitHub username. Tell the user who you've resolved the name to (e.g., "I'll request a review from @githubusername (Full Name)") before proceeding. Then pass `--reviewer <username>` to `pr-loop ready`.
+If the user mentioned one or more people's names as reviewers, use GitHub search (e.g., `gh api "search/users?q=FULLNAME+in:name"` or check the repo's contributors via `gh api repos/OWNER/REPO/contributors`) to determine their GitHub usernames. Tell the user who you've resolved the names to (e.g., "I'll request reviews from @alice (Alice Smith) and @bob (Bob Jones)") before proceeding. Then pass `--reviewer <username>` for each reviewer to `pr-loop ready` (e.g., `--reviewer alice --reviewer bob`).
 
 Run `pr-loop ready` (add `--preserve-claude-threads` if user passed "preserve", add `--reviewer <username>` if a reviewer was identified):
 

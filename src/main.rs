@@ -163,7 +163,7 @@ fn main() {
                 &cli.include_checks,
                 &cli.exclude_checks,
                 preserve_claude_threads,
-                reviewer.as_deref(),
+                &reviewer,
             );
         }
 
@@ -915,7 +915,7 @@ fn run_ready_command(
     include_checks: &[String],
     exclude_checks: &[String],
     preserve_claude_threads: bool,
-    reviewer: Option<&str>,
+    reviewers: &[String],
 ) {
     let checks_client = RealChecksClient;
     let threads_client = RealThreadsClient;
@@ -1092,8 +1092,8 @@ fn run_ready_command(
         }
     }
 
-    // Step 7 (optional): Request review from specified reviewer
-    if let Some(username) = reviewer {
+    // Step 7 (optional): Request review from specified reviewers
+    for username in reviewers {
         println!("Requesting review from @{}...", username);
         match pr_client.add_reviewer(&pr_context.owner, &pr_context.repo, pr_context.pr_number, username) {
             Ok(()) => {

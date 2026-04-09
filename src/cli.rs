@@ -84,9 +84,10 @@ pub enum Command {
         #[arg(long)]
         preserve_claude_threads: bool,
 
-        /// GitHub username to request a review from after marking the PR ready.
+        /// GitHub username(s) to request review from after marking the PR ready.
+        /// Can be specified multiple times: --reviewer alice --reviewer bob
         #[arg(long)]
-        reviewer: Option<String>,
+        reviewer: Vec<String>,
     },
 
     /// Delete resolved review threads where all comments are from Claude.
@@ -297,7 +298,7 @@ mod tests {
         match cli.command {
             Some(Command::Ready { preserve_claude_threads, reviewer }) => {
                 assert!(!preserve_claude_threads);
-                assert!(reviewer.is_none());
+                assert!(reviewer.is_empty());
             }
             _ => panic!("Expected Ready command"),
         }
@@ -311,7 +312,7 @@ mod tests {
         match cli.command {
             Some(Command::Ready { preserve_claude_threads, reviewer }) => {
                 assert!(!preserve_claude_threads);
-                assert!(reviewer.is_none());
+                assert!(reviewer.is_empty());
             }
             _ => panic!("Expected Ready command"),
         }
@@ -351,7 +352,7 @@ mod tests {
         match cli.command {
             Some(Command::Ready { preserve_claude_threads, reviewer }) => {
                 assert!(preserve_claude_threads);
-                assert!(reviewer.is_none());
+                assert!(reviewer.is_empty());
             }
             _ => panic!("Expected Ready command"),
         }
@@ -363,7 +364,7 @@ mod tests {
         match cli.command {
             Some(Command::Ready { preserve_claude_threads, reviewer }) => {
                 assert!(!preserve_claude_threads);
-                assert_eq!(reviewer, Some("octocat".to_string()));
+                assert_eq!(reviewer, vec!["octocat".to_string()]);
             }
             _ => panic!("Expected Ready command"),
         }
