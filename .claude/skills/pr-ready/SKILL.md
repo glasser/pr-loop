@@ -86,6 +86,7 @@ Once that exits successfully, run `pr-loop ready` again.
 
 ## Important Notes
 
+- **If pr-loop is running as a background task**, stop it first before running `pr-loop ready`.
 - The PR must be in draft mode - this command is for transitioning drafts to ready
 - The PR must have exactly one commit - squash your commits before running
 - CI must be fully passing (not pending) before marking ready

@@ -36,6 +36,7 @@ If you don't pass `--status-message`, any previous status message is cleared (th
 
 ## Important Notes
 
+- **If pr-loop is already running as a background task**, stop it first before starting a new loop.
 - This mode is for autonomous operation - the user may be away
 - You must still address any comments or CI failures that appear - the difference from attended mode is that you can finish successfully once there's nothing left to do
 - The PR must be in draft mode to use `--maintain-status`

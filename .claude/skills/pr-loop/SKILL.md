@@ -33,6 +33,7 @@ If you don't pass `--status-message`, any previous status message is cleared (th
 
 ## Important Notes
 
+- **If pr-loop is already running as a background task**, stop it first before starting a new loop.
 - This loop runs indefinitely until the user tells you to stop
 - The PR must be in draft mode to use `--maintain-status`
 - Address one item at a time to keep the iteration loop fast - don't batch everything before pushing
