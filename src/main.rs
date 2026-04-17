@@ -2,6 +2,7 @@
 // Analyzes PR state (CI checks, review threads) and recommends next actions.
 
 mod analysis;
+mod cc_status;
 mod checks;
 mod circleci;
 mod cli;

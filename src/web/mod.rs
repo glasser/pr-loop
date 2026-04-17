@@ -1,6 +1,7 @@
 // Local HTTP server for `pr-loop web`. Shows unresolved review threads + PR
 // commits in a browser with live updates.
 
+use crate::cc_status::{read_cc_status, CcStatus};
 use crate::commits::{CommitsClient, PrCommit, RealCommitsClient};
 use crate::git::{GitClient, RealGitClient};
 use crate::github::PrContext;
@@ -111,6 +112,16 @@ struct State {
     last_error: Option<String>,
 }
 
+/// What gets serialized to the client on each /api/state call. Combines the
+/// cached PR state with a fresh snapshot of Claude Code's transcript so the
+/// CC status updates at client-poll cadence (1s), not GitHub-poll cadence.
+#[derive(Serialize)]
+struct StateResponse<'a> {
+    #[serde(flatten)]
+    state: &'a State,
+    cc_status: Option<CcStatus>,
+}
+
 struct Shared {
     state: Mutex<State>,
     // Condvar-paired flag so handlers can poke the poller.
@@ -204,7 +215,13 @@ fn handle_request(
         (&Method::Get, "/") => build_response(INDEX_HTML.to_string(), "text/html; charset=utf-8", 200),
         (&Method::Get, "/api/state") => {
             let state = shared.state.lock().unwrap().clone();
-            let body = serde_json::to_string(&state)?;
+            let cwd = std::env::current_dir().ok();
+            let cc_status = cwd.as_deref().and_then(read_cc_status);
+            let response = StateResponse {
+                state: &state,
+                cc_status,
+            };
+            let body = serde_json::to_string(&response)?;
             build_response(body, "application/json", 200)
         }
         (&Method::Post, "/api/poke") => {

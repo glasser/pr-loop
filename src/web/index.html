@@ -62,6 +62,53 @@
   }
   #connection-banner.visible { display: block; }
   .banner-visible > #header { margin-top: 36px; }
+  #cc-strip {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 16px;
+    background: var(--thread-bg);
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--muted);
+  }
+  #cc-strip .dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: cc-pulse 1.4s ease-in-out infinite;
+  }
+  #cc-strip.idle .dot {
+    background: var(--border);
+    animation: none;
+  }
+  @keyframes cc-pulse {
+    0%, 100% { opacity: 0.4; }
+    50% { opacity: 1; }
+  }
+  #cc-strip .tool {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--fg);
+    font-weight: 600;
+  }
+  #cc-strip .preview {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+  #cc-strip .spacer { flex: 1; }
+  #cc-strip .sidechain {
+    font-size: 10px;
+    padding: 0 4px;
+    border-radius: 3px;
+    background: var(--border-muted);
+    color: var(--muted);
+  }
   #header {
     padding: 12px 16px;
     border-bottom: 1px solid var(--border);
@@ -490,6 +537,46 @@ function Thread({ thread, onPoke }) {
   `;
 }
 
+function CcStrip({ status }) {
+  if (!status) {
+    return html`
+      <div id="cc-strip" class="idle">
+        <span class="dot"></span>
+        <span>Claude Code: no transcript detected in this directory</span>
+      </div>
+    `;
+  }
+  const tools = status.in_flight || [];
+  const idle = tools.length === 0;
+  const lastActivity = status.last_activity_at ? relativeTime(status.last_activity_at) : null;
+
+  if (idle) {
+    return html`
+      <div id="cc-strip" class="idle">
+        <span class="dot"></span>
+        <span>Claude Code idle${lastActivity ? ` — last activity ${lastActivity}` : ''}</span>
+      </div>
+    `;
+  }
+
+  // Show primary tool (most recent) + any others as a count.
+  const primary = tools[tools.length - 1];
+  const others = tools.length - 1;
+  const runningFor = relativeTime(primary.started_at);
+
+  return html`
+    <div id="cc-strip">
+      <span class="dot"></span>
+      <span>Claude Code running</span>
+      <span class="tool">${primary.name}</span>
+      ${primary.is_sidechain && html`<span class="sidechain">subagent</span>`}
+      ${primary.preview && html`<span class="preview" title=${primary.preview}>${primary.preview}</span>`}
+      <span class="spacer"></span>
+      <span>${runningFor}${others > 0 ? ` · +${others} more` : ''}</span>
+    </div>
+  `;
+}
+
 function Commit({ commit, isNew, onDismiss }) {
   const ago = relativeTime(commit.committed_date);
   const author = commit.author_login || commit.author_name || '';
@@ -583,6 +670,7 @@ function App() {
       ⚠ Lost connection to pr-loop server. Is it still running?
     </div>
     <div class=${connectionLost ? 'banner-visible' : ''}>
+      <${CcStrip} status=${data.cc_status} />
       <div id="header">
         <h1>${data.pr.owner}/${data.pr.repo} #${data.pr.pr_number}</h1>
         <div class="meta">${metaBits.join(' · ')}</div>
