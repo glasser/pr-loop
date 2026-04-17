@@ -18,6 +18,7 @@
     --ok-bg: #dafbe1;
     --ok-fg: #116329;
     --thread-bg: #f6f8fa;
+    --claude-bg: #e6ebf1;
     --outdated: #ffd9a8;
   }
   @media (prefers-color-scheme: dark) {
@@ -33,6 +34,7 @@
       --ok-bg: #033a16;
       --ok-fg: #7ee787;
       --thread-bg: #161b22;
+      --claude-bg: #1d2430;
       --outdated: #553b1b;
     }
   }
@@ -196,8 +198,14 @@
   }
   .comment:last-child { border-bottom: none; margin-bottom: 0; }
   .comment.claude {
-    background: var(--thread-bg);
+    background: var(--claude-bg);
     border-bottom-color: transparent;
+  }
+  /* github-markdown-css sets .markdown-body background to white by default —
+     override so it inherits the surrounding comment's background. */
+  .comment-body.markdown-body {
+    background: transparent;
+    color: inherit;
   }
   .comment-meta {
     display: flex;
