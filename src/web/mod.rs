@@ -176,11 +176,13 @@ pub fn run(pr_context: &PrContext, port: Option<u16>, no_open: bool) -> Result<(
     let _ = ctrlc_cleanup(port_file_clone);
 
     // Request loop
+    let pr_for_handlers = pr_context.clone();
     for request in server.incoming_requests() {
         let shared = Arc::clone(&shared);
+        let pr_ctx = pr_for_handlers.clone();
         // Handle synchronously — requests are cheap and the workload is small.
         // A reply or resolve mutation may take ~1s but that's fine for a local UI.
-        if let Err(e) = handle_request(request, &shared) {
+        if let Err(e) = handle_request(request, &shared, &pr_ctx) {
             eprintln!("web: request error: {}", e);
         }
     }
@@ -189,7 +191,11 @@ pub fn run(pr_context: &PrContext, port: Option<u16>, no_open: bool) -> Result<(
     Ok(())
 }
 
-fn handle_request(mut request: tiny_http::Request, shared: &Arc<Shared>) -> Result<()> {
+fn handle_request(
+    mut request: tiny_http::Request,
+    shared: &Arc<Shared>,
+    pr_context: &PrContext,
+) -> Result<()> {
     let method = request.method().clone();
     let url = request.url().to_string();
     let path = url.split('?').next().unwrap_or(&url).to_string();
@@ -211,6 +217,10 @@ fn handle_request(mut request: tiny_http::Request, shared: &Arc<Shared>) -> Resu
             let client = RealReplyClient;
             match client.resolve_thread(&thread_id) {
                 Ok(()) => {
+                    // Synchronously re-fetch so the client's next /api/state
+                    // call (which usually follows immediately) sees the new
+                    // state. Also poke the poller to reset its interval.
+                    refresh_state(pr_context, shared);
                     shared.poke();
                     build_response("{}".to_string(), "application/json", 200)
                 }
@@ -242,6 +252,7 @@ fn handle_request(mut request: tiny_http::Request, shared: &Arc<Shared>) -> Resu
                     // human, so we don't apply the Claude marker prefix.
                     match client.post_reply(&thread_id, &payload.body) {
                         Ok(_) => {
+                            refresh_state(pr_context, shared);
                             shared.poke();
                             build_response("{}".to_string(), "application/json", 200)
                         }
@@ -266,6 +277,14 @@ fn handle_request(mut request: tiny_http::Request, shared: &Arc<Shared>) -> Resu
         .respond(resp)
         .map_err(|e| anyhow::anyhow!("respond: {}", e))?;
     Ok(())
+}
+
+/// Synchronously re-fetch threads + commits from GitHub and update the cache.
+/// Called from mutation handlers so the next /api/state is fresh.
+fn refresh_state(pr_context: &PrContext, shared: &Arc<Shared>) {
+    let threads_client = RealThreadsClient;
+    let commits_client = RealCommitsClient;
+    fetch_now(pr_context, &threads_client, &commits_client, shared);
 }
 
 fn build_response(body: String, ct: &str, status: u16) -> Response<std::io::Cursor<Vec<u8>>> {

@@ -246,7 +246,20 @@
     border-color: var(--accent);
   }
   button.primary:hover { filter: brightness(1.1); }
-  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button:disabled { opacity: 0.6; cursor: not-allowed; }
+  button.spin::before {
+    content: '';
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border: 2px solid currentColor;
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: pr-spin 0.7s linear infinite;
+    margin-right: 6px;
+    vertical-align: -1px;
+  }
+  @keyframes pr-spin { to { transform: rotate(360deg); } }
   .reply-box {
     padding: 12px;
     border-top: 1px solid var(--border-muted);
@@ -449,7 +462,7 @@ function Thread({ thread, onPoke }) {
           }}
         ></textarea>
         <div class="actions">
-          <button class="primary" onClick=${doReply} disabled=${posting || !reply.trim()}>
+          <button class=${'primary' + (posting ? ' spin' : '')} onClick=${doReply} disabled=${posting || !reply.trim()}>
             ${posting ? 'Posting…' : 'Reply'}
           </button>
           <span class="hint">Cmd/Ctrl+Enter</span>
