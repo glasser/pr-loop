@@ -195,11 +195,16 @@
   .diff-del { background: rgba(248, 81, 73, 0.15); }
   .diff-hunk-header { color: var(--muted); }
   .comment {
-    padding-bottom: 12px;
+    padding: 8px 10px;
     margin-bottom: 12px;
     border-bottom: 1px solid var(--border-muted);
+    border-radius: 4px;
   }
-  .comment:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+  .comment:last-child { border-bottom: none; margin-bottom: 0; }
+  .comment.claude {
+    background: var(--thread-bg);
+    border-bottom-color: transparent;
+  }
   .comment-meta {
     display: flex;
     align-items: center;
@@ -209,6 +214,7 @@
     font-size: 12px;
   }
   .comment-meta .author { font-weight: 600; color: var(--fg); }
+  .comment-meta .author .via { font-weight: 400; color: var(--muted); }
   .comment-meta a { color: var(--muted); text-decoration: none; }
   .comment-meta a:hover { color: var(--accent); text-decoration: underline; }
   .comment-body {
@@ -371,14 +377,21 @@
     const firstCommentUrl = thread.comments[0] && thread.comments[0].url;
 
     const commentsHtml = thread.comments.map(c => {
-      const bodyHtml = md.render(c.body || '');
+      const rawBody = c.body || '';
+      const claudeMatch = rawBody.match(/^🤖 From Claude:\s?/);
+      const isClaude = !!claudeMatch;
+      const displayBody = isClaude ? rawBody.slice(claudeMatch[0].length) : rawBody;
+      const bodyHtml = md.render(displayBody);
       const ago = relativeTime(c.created_at);
       const authorLink = c.url
         ? '<a href="' + escapeHtml(c.url) + '" target="_blank">' + (ago || 'link') + '</a>'
         : ago;
-      return '<div class="comment">'
+      const authorLabel = isClaude
+        ? '🤖 Claude <span class="via">via @' + escapeHtml(c.author || '') + '</span>'
+        : '@' + escapeHtml(c.author || '');
+      return '<div class="comment' + (isClaude ? ' claude' : '') + '">'
         + '<div class="comment-meta">'
-        +   '<span class="author">@' + escapeHtml(c.author || '') + '</span>'
+        +   '<span class="author">' + authorLabel + '</span>'
         +   '<span>·</span>'
         +   authorLink
         + '</div>'
@@ -404,7 +417,7 @@
       +   (diffHunk ? '<div class="thread-diff">' + renderDiff(diffHunk) + '</div>' : '')
       + '</div>'
       + '<div class="reply-box">'
-      +   '<textarea placeholder="Reply… (will be prefixed with 🤖 From Claude: when posted via this UI)"></textarea>'
+      +   '<textarea placeholder="Reply as yourself…"></textarea>'
       +   '<div class="actions">'
       +     '<button class="reply-btn primary">Reply</button>'
       +     '<span class="hint">Cmd/Ctrl+Enter</span>'

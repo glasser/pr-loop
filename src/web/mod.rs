@@ -4,7 +4,7 @@
 use crate::commits::{CommitsClient, PrCommit, RealCommitsClient};
 use crate::git::{GitClient, RealGitClient};
 use crate::github::PrContext;
-use crate::reply::{format_claude_message, RealReplyClient, ReplyClient};
+use crate::reply::{RealReplyClient, ReplyClient};
 use crate::threads::{RealThreadsClient, ReviewThread, ThreadComment, ThreadsClient};
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -238,8 +238,9 @@ fn handle_request(mut request: tiny_http::Request, shared: &Arc<Shared>) -> Resu
             match serde_json::from_slice::<ReplyReq>(&body_bytes) {
                 Ok(payload) => {
                     let client = RealReplyClient;
-                    let message = format_claude_message(&payload.body);
-                    match client.post_reply(&thread_id, &message) {
+                    // Post the user's reply verbatim — the UI is driven by a
+                    // human, so we don't apply the Claude marker prefix.
+                    match client.post_reply(&thread_id, &payload.body) {
                         Ok(_) => {
                             shared.poke();
                             build_response("{}".to_string(), "application/json", 200)
