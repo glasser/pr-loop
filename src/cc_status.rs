@@ -46,10 +46,14 @@ pub fn read_cc_status(cwd: &Path) -> Option<CcStatus> {
 
 fn session_dir_for_cwd(cwd: &Path) -> Option<PathBuf> {
     let abs = cwd.canonicalize().ok().unwrap_or_else(|| cwd.to_path_buf());
+    // Claude Code encodes the CWD for its project directory by replacing
+    // anything that isn't alphanumeric, `-`, or `_` with `-`. So
+    // `/Users/foo/.config` → `-Users-foo--config`,
+    // `/Users/foo/monorepo.git/wt` → `-Users-foo-monorepo-git-wt`.
     let encoded: String = abs
         .to_string_lossy()
         .chars()
-        .map(|c| if c == '/' { '-' } else { c })
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
         .collect();
     let home = std::env::var_os("HOME")?;
     Some(PathBuf::from(home).join(".claude/projects").join(encoded))
