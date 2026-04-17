@@ -46,6 +46,9 @@ pub enum CcActivity {
 pub struct CcStatus {
     pub activity: CcActivity,
     pub in_flight: Vec<InFlightTool>,
+    /// Most recent tool_use whose matching tool_result has been written —
+    /// useful for showing "last: Edit foo.rs" when CC is thinking or idle.
+    pub last_completed_tool: Option<InFlightTool>,
     pub last_activity_at: Option<String>,
     pub last_assistant_text: Option<String>,
 }
@@ -149,6 +152,7 @@ fn parse_events(content: &str) -> CcStatus {
             return CcStatus {
                 activity: CcActivity::Idle,
                 in_flight: vec![],
+                last_completed_tool: None,
                 last_activity_at,
                 last_assistant_text,
             };
@@ -220,12 +224,55 @@ fn parse_events(content: &str) -> CcStatus {
         }
     };
 
+    let last_completed_tool = find_last_completed_tool(&events);
+
     CcStatus {
         activity,
         in_flight,
+        last_completed_tool,
         last_activity_at,
         last_assistant_text,
     }
+}
+
+/// Walk events backward to find the most recent tool_use whose matching
+/// tool_result has been written. Returns None if no completed tool is in
+/// the window.
+fn find_last_completed_tool(events: &[Value]) -> Option<InFlightTool> {
+    // Collect all tool_result ids (these are "completed" tool_use ids).
+    let completed_ids: std::collections::HashSet<String> = events
+        .iter()
+        .filter_map(|ev| ev.get("message").and_then(|m| m.get("content")).and_then(|c| c.as_array()))
+        .flat_map(|arr| arr.iter())
+        .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+        .filter_map(|b| b.get("tool_use_id").and_then(|i| i.as_str()).map(str::to_string))
+        .collect();
+
+    // Walk events backward; for each assistant message, scan its tool_use
+    // blocks (also in reverse) and return the first one whose id is in
+    // `completed_ids`.
+    for ev in events.iter().rev() {
+        if ev.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+            continue;
+        }
+        let Some(blocks) = ev.get("message").and_then(|m| m.get("content")).and_then(|c| c.as_array()) else { continue };
+        let timestamp = ev.get("timestamp").and_then(|t| t.as_str()).unwrap_or("").to_string();
+        let is_sidechain = ev.get("isSidechain").and_then(|b| b.as_bool()).unwrap_or(false);
+        for block in blocks.iter().rev() {
+            if block.get("type").and_then(|t| t.as_str()) != Some("tool_use") { continue; }
+            let Some(id) = block.get("id").and_then(|i| i.as_str()) else { continue };
+            if !completed_ids.contains(id) { continue; }
+            let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("?").to_string();
+            let preview = preview_for_tool(&name, block.get("input"));
+            return Some(InFlightTool {
+                name,
+                started_at: timestamp,
+                preview,
+                is_sidechain,
+            });
+        }
+    }
+    None
 }
 
 fn find_last_assistant_text(events: &[Value]) -> Option<String> {

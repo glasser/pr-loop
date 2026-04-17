@@ -616,12 +616,19 @@ function CcStrip({ status }) {
     `;
   }
 
+  const last = status.last_completed_tool;
+  const lastToolBits = last
+    ? html` <span class="spacer"></span>
+            <span>last: <span class="tool">${last.name}</span>${last.preview ? html` ${last.preview}` : ''}</span>`
+    : null;
+
   if (activity === 'thinking') {
     return html`
       <div id="cc-strip" class="thinking">
         <div class="row">
           <span class="dot"></span>
           <span>Claude Code <b>thinking</b>…${lastActivity ? ` (${lastActivity})` : ''}</span>
+          ${lastToolBits}
         </div>
         ${lastTextRow}
       </div>
@@ -634,6 +641,7 @@ function CcStrip({ status }) {
       <div class="row">
         <span class="dot"></span>
         <span>Claude Code <b>idle</b>${lastActivity ? ` — last activity ${lastActivity}` : ''}</span>
+        ${lastToolBits}
       </div>
       ${lastTextRow}
     </div>
