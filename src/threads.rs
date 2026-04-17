@@ -11,6 +11,9 @@ pub struct ThreadComment {
     pub id: String,
     pub author: String,
     pub body: String,
+    pub diff_hunk: Option<String>,
+    pub url: Option<String>,
+    pub created_at: Option<String>,
 }
 
 /// A review thread on a PR.
@@ -18,6 +21,7 @@ pub struct ThreadComment {
 pub struct ReviewThread {
     pub id: String,
     pub is_resolved: bool,
+    pub is_outdated: bool,
     pub path: Option<String>,
     pub line: Option<u64>,
     pub comments: Vec<ThreadComment>,
@@ -207,6 +211,8 @@ struct ReviewThreadNode {
     id: String,
     #[serde(rename = "isResolved")]
     is_resolved: bool,
+    #[serde(rename = "isOutdated", default)]
+    is_outdated: bool,
     path: Option<String>,
     line: Option<u64>,
     comments: CommentsConnection,
@@ -224,6 +230,12 @@ struct CommentNode {
     id: String,
     author: Option<AuthorNode>,
     body: String,
+    #[serde(rename = "diffHunk", default)]
+    diff_hunk: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(rename = "createdAt", default)]
+    created_at: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -255,6 +267,9 @@ fn fetch_threads_from_graphql(
                     id: c.id,
                     author: c.author.map(|a| a.login).unwrap_or_else(|| "ghost".to_string()),
                     body: c.body,
+                    diff_hunk: c.diff_hunk,
+                    url: c.url,
+                    created_at: c.created_at,
                 })
                 .collect();
 
@@ -268,6 +283,7 @@ fn fetch_threads_from_graphql(
             all_threads.push(ReviewThread {
                 id: t.id,
                 is_resolved: t.is_resolved,
+                is_outdated: t.is_outdated,
                 path: t.path,
                 line: t.line,
                 comments,
@@ -401,6 +417,9 @@ fn fetch_remaining_comments(
                 id: c.id,
                 author: c.author.map(|a| a.login).unwrap_or_else(|| "ghost".to_string()),
                 body: c.body,
+                diff_hunk: c.diff_hunk,
+                url: c.url,
+                created_at: c.created_at,
             })
             .collect();
 
@@ -547,6 +566,9 @@ mod tests {
             id: format!("comment_{}", body.len()),
             author: author.to_string(),
             body: body.to_string(),
+            diff_hunk: None,
+            url: None,
+            created_at: None,
         }
     }
 
@@ -554,6 +576,7 @@ mod tests {
         ReviewThread {
             id: id.to_string(),
             is_resolved: resolved,
+            is_outdated: false,
             path: Some("src/main.rs".to_string()),
             line: Some(42),
             comments,
@@ -581,6 +604,7 @@ mod tests {
         let thread = ReviewThread {
             id: "T1".to_string(),
             is_resolved: false,
+            is_outdated: false,
             path: None,
             line: None,
             comments: vec![],
@@ -647,6 +671,7 @@ mod tests {
         let thread = ReviewThread {
             id: "T1".to_string(),
             is_resolved: false,
+            is_outdated: false,
             path: None,
             line: None,
             comments: vec![],
@@ -742,6 +767,7 @@ mod tests {
         let thread = ReviewThread {
             id: "T1".to_string(),
             is_resolved: true,
+            is_outdated: false,
             path: None,
             line: None,
             comments: vec![],
@@ -768,6 +794,9 @@ mod tests {
             id: id.to_string(),
             author: author.to_string(),
             body: body.to_string(),
+            diff_hunk: None,
+            url: None,
+            created_at: None,
         }
     }
 
@@ -907,6 +936,7 @@ mod tests {
         let thread = ReviewThread {
             id: "T1".to_string(),
             is_resolved: false,
+            is_outdated: false,
             path: None,
             line: None,
             comments: vec![],

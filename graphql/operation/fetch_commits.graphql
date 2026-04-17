@@ -1,0 +1,27 @@
+query FetchCommits($owner: String!, $repo: String!, $pr: Int!, $cursor: String) {
+    repository(owner: $owner, name: $repo) {
+        pullRequest(number: $pr) {
+            commits(first: 100, after: $cursor) {
+                nodes {
+                    url
+                    commit {
+                        oid
+                        abbreviatedOid
+                        messageHeadline
+                        committedDate
+                        author {
+                            name
+                            user {
+                                login
+                            }
+                        }
+                    }
+                }
+                pageInfo {
+                    hasNextPage
+                    endCursor
+                }
+            }
+        }
+    }
+}

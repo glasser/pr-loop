@@ -8,6 +8,9 @@ query FetchRemainingComments($id: ID!, $cursor: String) {
                         login
                     }
                     body
+                    diffHunk
+                    url
+                    createdAt
                 }
                 pageInfo {
                     hasNextPage

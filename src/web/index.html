@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>pr-loop web</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@5/github-markdown.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github.min.css">
+<script src="https://cdn.jsdelivr.net/npm/marked@14/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked-highlight@2/lib/index.umd.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@joeattardi/emoji-button@4/dist/index.js" onerror="/* optional */"></script>
+<script src="https://cdn.jsdelivr.net/npm/markdown-it@14/dist/markdown-it.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/markdown-it-emoji@3/dist/markdown-it-emoji.min.js"></script>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1f2328;
+    --muted: #656d76;
+    --border: #d0d7de;
+    --border-muted: #eaeef2;
+    --accent: #0969da;
+    --danger-bg: #ffebe9;
+    --danger-fg: #cf222e;
+    --ok-bg: #dafbe1;
+    --ok-fg: #116329;
+    --thread-bg: #f6f8fa;
+    --outdated: #ffd9a8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117;
+      --fg: #c9d1d9;
+      --muted: #8b949e;
+      --border: #30363d;
+      --border-muted: #21262d;
+      --accent: #58a6ff;
+      --danger-bg: #490202;
+      --danger-fg: #ff7b72;
+      --ok-bg: #033a16;
+      --ok-fg: #7ee787;
+      --thread-bg: #161b22;
+      --outdated: #553b1b;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 14px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  #connection-banner {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    background: var(--danger-bg);
+    color: var(--danger-fg);
+    padding: 8px 16px;
+    font-weight: 600;
+    text-align: center;
+    z-index: 100;
+    display: none;
+    border-bottom: 1px solid var(--danger-fg);
+  }
+  #connection-banner.visible { display: block; }
+  body.banner-visible #layout { padding-top: 36px; }
+  #header {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  #header h1 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+  }
+  #header a { color: var(--accent); text-decoration: none; }
+  #header a:hover { text-decoration: underline; }
+  #header .meta {
+    margin-left: auto;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  #layout {
+    display: grid;
+    grid-template-columns: 1fr 320px;
+    gap: 16px;
+    padding: 16px;
+    max-width: 1600px;
+    margin: 0 auto;
+  }
+  #threads { min-width: 0; }
+  #commits-panel {
+    position: sticky;
+    top: 16px;
+    align-self: start;
+    max-height: calc(100vh - 32px);
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px;
+    background: var(--bg);
+  }
+  #commits-panel h2 {
+    margin: 0 0 8px 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .commit {
+    padding: 8px 0;
+    border-top: 1px solid var(--border-muted);
+  }
+  .commit:first-child { border-top: none; }
+  .commit .title {
+    font-weight: 500;
+    color: var(--fg);
+    text-decoration: none;
+    display: block;
+    line-height: 1.35;
+  }
+  .commit .title:hover { color: var(--accent); }
+  .commit .meta {
+    color: var(--muted);
+    font-size: 12px;
+    margin-top: 2px;
+  }
+  .commit .oid {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+  }
+  .thread {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin-bottom: 16px;
+    background: var(--bg);
+    overflow: hidden;
+  }
+  .thread.outdated {
+    border-left: 3px solid var(--outdated);
+  }
+  .thread-header {
+    background: var(--thread-bg);
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+  }
+  .thread-header .location {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--fg);
+  }
+  .thread-header .badge {
+    font-size: 11px;
+    padding: 1px 6px;
+    border-radius: 10px;
+    background: var(--outdated);
+    color: var(--fg);
+  }
+  .thread-header .actions {
+    margin-left: auto;
+    display: flex;
+    gap: 8px;
+  }
+  .thread-body {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0;
+  }
+  .thread-body.no-diff { grid-template-columns: 1fr; }
+  .thread-comments { padding: 12px; min-width: 0; }
+  .thread-diff {
+    border-left: 1px solid var(--border);
+    padding: 12px;
+    background: var(--thread-bg);
+    overflow-x: auto;
+    min-width: 0;
+  }
+  .thread-diff pre {
+    margin: 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    line-height: 1.45;
+    white-space: pre;
+  }
+  .diff-add { background: rgba(35, 134, 54, 0.15); }
+  .diff-del { background: rgba(248, 81, 73, 0.15); }
+  .diff-hunk-header { color: var(--muted); }
+  .comment {
+    padding-bottom: 12px;
+    margin-bottom: 12px;
+    border-bottom: 1px solid var(--border-muted);
+  }
+  .comment:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+  .comment-meta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 4px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .comment-meta .author { font-weight: 600; color: var(--fg); }
+  .comment-meta a { color: var(--muted); text-decoration: none; }
+  .comment-meta a:hover { color: var(--accent); text-decoration: underline; }
+  .comment-body {
+    font-size: 14px;
+  }
+  .comment-body pre {
+    background: var(--thread-bg);
+    padding: 8px;
+    border-radius: 4px;
+    overflow-x: auto;
+  }
+  .comment-body code {
+    background: var(--thread-bg);
+    padding: 1px 4px;
+    border-radius: 3px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.9em;
+  }
+  .comment-body pre code { padding: 0; background: transparent; }
+  .comment-body p:first-child { margin-top: 0; }
+  .comment-body p:last-child { margin-bottom: 0; }
+  button {
+    font: inherit;
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    padding: 4px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  button:hover { background: var(--thread-bg); }
+  button.primary {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+  }
+  button.primary:hover { filter: brightness(1.1); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .reply-box {
+    padding: 12px;
+    border-top: 1px solid var(--border-muted);
+    background: var(--thread-bg);
+  }
+  .reply-box textarea {
+    width: 100%;
+    min-height: 60px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 8px;
+    font: inherit;
+    font-size: 13px;
+    background: var(--bg);
+    color: var(--fg);
+    resize: vertical;
+  }
+  .reply-box .actions {
+    margin-top: 6px;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .reply-box .hint {
+    color: var(--muted);
+    font-size: 12px;
+    margin-left: auto;
+  }
+  .empty {
+    text-align: center;
+    color: var(--muted);
+    padding: 48px 16px;
+  }
+  .empty .big { font-size: 32px; margin-bottom: 8px; }
+</style>
+</head>
+<body>
+  <div id="connection-banner">⚠ Lost connection to pr-loop server. Is it still running?</div>
+
+  <div id="header">
+    <h1 id="pr-title">Loading…</h1>
+    <div class="meta" id="pr-meta"></div>
+  </div>
+
+  <div id="layout">
+    <div id="threads"><div class="empty">Loading…</div></div>
+    <div id="commits-panel">
+      <h2>Commits</h2>
+      <div id="commits"></div>
+    </div>
+  </div>
+
+<script>
+(function() {
+  const md = window.markdownit({ html: false, linkify: true, breaks: true });
+  if (window.markdownitEmoji) {
+    md.use(window.markdownitEmoji.full || window.markdownitEmoji.default || window.markdownitEmoji);
+  }
+  // Monkey-patch fence renderer to use highlight.js
+  const origFence = md.renderer.rules.fence || function(t,i,o,e,s) { return s.renderToken(t,i,o); };
+  md.renderer.rules.fence = function(tokens, idx, options, env, self) {
+    const token = tokens[idx];
+    const info = token.info ? token.info.trim() : '';
+    const lang = info.split(/\s+/g)[0];
+    if (lang && hljs.getLanguage(lang)) {
+      try {
+        const highlighted = hljs.highlight(token.content, { language: lang, ignoreIllegals: true }).value;
+        return '<pre><code class="hljs language-' + lang + '">' + highlighted + '</code></pre>';
+      } catch (e) {}
+    }
+    return origFence(tokens, idx, options, env, self);
+  };
+
+  let consecutiveFailures = 0;
+  let lastData = null;
+
+  function setConnectionBanner(visible) {
+    const banner = document.getElementById('connection-banner');
+    banner.classList.toggle('visible', visible);
+    document.body.classList.toggle('banner-visible', visible);
+  }
+
+  function relativeTime(iso) {
+    if (!iso) return '';
+    const then = new Date(iso).getTime();
+    const now = Date.now();
+    const secs = Math.round((now - then) / 1000);
+    if (secs < 0) return 'just now';
+    if (secs < 60) return secs + 's ago';
+    const mins = Math.round(secs / 60);
+    if (mins < 60) return mins + 'm ago';
+    const hours = Math.round(mins / 60);
+    if (hours < 24) return hours + 'h ago';
+    const days = Math.round(hours / 24);
+    return days + 'd ago';
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c =>
+      ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])
+    );
+  }
+
+  function renderDiff(hunk) {
+    if (!hunk) return '';
+    const lines = hunk.split('\n');
+    return '<pre>' + lines.map(l => {
+      const cls = l.startsWith('+') && !l.startsWith('+++') ? 'diff-add'
+                : l.startsWith('-') && !l.startsWith('---') ? 'diff-del'
+                : l.startsWith('@@') ? 'diff-hunk-header' : '';
+      return cls
+        ? '<span class="' + cls + '">' + escapeHtml(l) + '</span>'
+        : escapeHtml(l);
+    }).join('\n') + '</pre>';
+  }
+
+  function renderThread(thread) {
+    const diffHunk = thread.comments[0] && thread.comments[0].diff_hunk;
+    const location = thread.path
+      ? (thread.line ? thread.path + ':' + thread.line : thread.path)
+      : 'unknown location';
+    const firstCommentUrl = thread.comments[0] && thread.comments[0].url;
+
+    const commentsHtml = thread.comments.map(c => {
+      const bodyHtml = md.render(c.body || '');
+      const ago = relativeTime(c.created_at);
+      const authorLink = c.url
+        ? '<a href="' + escapeHtml(c.url) + '" target="_blank">' + (ago || 'link') + '</a>'
+        : ago;
+      return '<div class="comment">'
+        + '<div class="comment-meta">'
+        +   '<span class="author">@' + escapeHtml(c.author || '') + '</span>'
+        +   '<span>·</span>'
+        +   authorLink
+        + '</div>'
+        + '<div class="comment-body markdown-body">' + bodyHtml + '</div>'
+        + '</div>';
+    }).join('');
+
+    const outdatedBadge = thread.is_outdated ? '<span class="badge">outdated</span>' : '';
+    const locationLink = firstCommentUrl
+      ? '<a class="location" href="' + escapeHtml(firstCommentUrl) + '" target="_blank">' + escapeHtml(location) + '</a>'
+      : '<span class="location">' + escapeHtml(location) + '</span>';
+
+    return '<div class="thread' + (thread.is_outdated ? ' outdated' : '') + '" data-thread-id="' + escapeHtml(thread.id) + '">'
+      + '<div class="thread-header">'
+      +   locationLink
+      +   outdatedBadge
+      +   '<div class="actions">'
+      +     '<button class="resolve-btn">Resolve</button>'
+      +   '</div>'
+      + '</div>'
+      + '<div class="thread-body' + (diffHunk ? '' : ' no-diff') + '">'
+      +   '<div class="thread-comments">' + commentsHtml + '</div>'
+      +   (diffHunk ? '<div class="thread-diff">' + renderDiff(diffHunk) + '</div>' : '')
+      + '</div>'
+      + '<div class="reply-box">'
+      +   '<textarea placeholder="Reply… (will be prefixed with 🤖 From Claude: when posted via this UI)"></textarea>'
+      +   '<div class="actions">'
+      +     '<button class="reply-btn primary">Reply</button>'
+      +     '<span class="hint">Cmd/Ctrl+Enter</span>'
+      +   '</div>'
+      + '</div>'
+      + '</div>';
+  }
+
+  function renderCommits(commits) {
+    if (!commits || commits.length === 0) {
+      return '<div class="commit"><span class="meta">No commits</span></div>';
+    }
+    return commits.map(c => {
+      const ago = relativeTime(c.committed_date);
+      const author = c.author_login || c.author_name || '';
+      return '<div class="commit">'
+        + '<a class="title" href="' + escapeHtml(c.url) + '" target="_blank">' + escapeHtml(c.message_headline) + '</a>'
+        + '<div class="meta">'
+        +   '<span class="oid">' + escapeHtml(c.abbreviated_oid) + '</span>'
+        +   (author ? ' · ' + escapeHtml(author) : '')
+        +   ' · <span data-ts="' + escapeHtml(c.committed_date) + '">' + ago + '</span>'
+        + '</div>'
+        + '</div>';
+    }).join('');
+  }
+
+  function render(data) {
+    lastData = data;
+    const title = data.pr.owner + '/' + data.pr.repo + ' #' + data.pr.pr_number;
+    document.getElementById('pr-title').textContent = title;
+
+    const metaBits = [];
+    if (data.last_fetched_at) {
+      metaBits.push('last fetched ' + relativeTime(data.last_fetched_at));
+    }
+    if (data.last_error) {
+      metaBits.push('⚠ ' + data.last_error);
+    }
+    document.getElementById('pr-meta').textContent = metaBits.join(' · ');
+
+    const threads = (data.threads || []).filter(t => !t.is_resolved && !t.is_paperclip);
+    const threadsEl = document.getElementById('threads');
+    if (threads.length === 0) {
+      threadsEl.innerHTML = '<div class="empty"><div class="big">🎉</div>No unresolved review threads.</div>';
+    } else {
+      threadsEl.innerHTML = threads.map(renderThread).join('');
+    }
+
+    document.getElementById('commits').innerHTML = renderCommits(data.commits);
+  }
+
+  function updateRelativeTimes() {
+    document.querySelectorAll('[data-ts]').forEach(el => {
+      el.textContent = relativeTime(el.getAttribute('data-ts'));
+    });
+    if (lastData) {
+      const metaBits = [];
+      if (lastData.last_fetched_at) metaBits.push('last fetched ' + relativeTime(lastData.last_fetched_at));
+      if (lastData.last_error) metaBits.push('⚠ ' + lastData.last_error);
+      document.getElementById('pr-meta').textContent = metaBits.join(' · ');
+    }
+  }
+
+  async function poll() {
+    try {
+      const res = await fetch('/api/state');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      consecutiveFailures = 0;
+      setConnectionBanner(false);
+      render(data);
+    } catch (e) {
+      consecutiveFailures++;
+      if (consecutiveFailures >= 3) setConnectionBanner(true);
+    }
+  }
+
+  document.addEventListener('click', async (ev) => {
+    const btn = ev.target.closest('button');
+    if (!btn) return;
+    const threadEl = btn.closest('.thread');
+    if (!threadEl) return;
+    const threadId = threadEl.getAttribute('data-thread-id');
+
+    if (btn.classList.contains('resolve-btn')) {
+      btn.disabled = true;
+      btn.textContent = 'Resolving…';
+      try {
+        const res = await fetch('/api/threads/' + encodeURIComponent(threadId) + '/resolve', { method: 'POST' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        poll();
+      } catch (e) {
+        btn.disabled = false;
+        btn.textContent = 'Resolve';
+        alert('Failed to resolve: ' + e.message);
+      }
+    } else if (btn.classList.contains('reply-btn')) {
+      const ta = threadEl.querySelector('.reply-box textarea');
+      const body = (ta.value || '').trim();
+      if (!body) return;
+      btn.disabled = true;
+      btn.textContent = 'Posting…';
+      try {
+        const res = await fetch('/api/threads/' + encodeURIComponent(threadId) + '/reply', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ body })
+        });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        ta.value = '';
+        poll();
+      } catch (e) {
+        alert('Failed to reply: ' + e.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Reply';
+      }
+    }
+  });
+
+  document.addEventListener('keydown', (ev) => {
+    if ((ev.metaKey || ev.ctrlKey) && ev.key === 'Enter') {
+      const ta = ev.target.closest('.reply-box textarea');
+      if (ta) {
+        const btn = ta.closest('.reply-box').querySelector('.reply-btn');
+        if (btn && !btn.disabled) btn.click();
+      }
+    }
+  });
+
+  poll();
+  setInterval(poll, 1000);
+  setInterval(updateRelativeTimes, 10000);
+})();
+</script>
+</body>
+</html>

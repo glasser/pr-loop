@@ -332,12 +332,16 @@ mod tests {
         ReviewThread {
             id: id.to_string(),
             is_resolved: resolved,
+            is_outdated: false,
             path: Some("test.rs".to_string()),
             line: Some(1),
             comments: vec![ThreadComment {
                 id: format!("comment_{}", id),
                 author: "reviewer".to_string(),
                 body: last_comment_body.to_string(),
+                diff_hunk: None,
+                url: None,
+                created_at: None,
             }],
         }
     }
@@ -567,12 +571,16 @@ mod tests {
             threads: vec![ReviewThread {
                 id: "T1".to_string(),
                 is_resolved: false,
+                is_outdated: false,
                 path: Some("test.rs".to_string()),
                 line: Some(1),
                 comments: vec![ThreadComment {
                     id: "C1".to_string(),
                     author: "reviewer".to_string(),
                     body: ":paperclip: This is for human review".to_string(),
+                    diff_hunk: None,
+                    url: None,
+                    created_at: None,
                 }],
             }],
         };
@@ -604,6 +612,7 @@ mod tests {
             threads: vec![ReviewThread {
                 id: "T1".to_string(),
                 is_resolved: false,
+                is_outdated: false,
                 path: Some("test.rs".to_string()),
                 line: Some(1),
                 comments: vec![
@@ -611,11 +620,17 @@ mod tests {
                         id: "C1".to_string(),
                         author: "reviewer".to_string(),
                         body: "Please fix this".to_string(),
+                        diff_hunk: None,
+                        url: None,
+                        created_at: None,
                     },
                     ThreadComment {
                         id: "C2".to_string(),
                         author: "reviewer".to_string(),
                         body: ":paperclip: But note this for human review".to_string(),
+                        diff_hunk: None,
+                        url: None,
+                        created_at: None,
                     },
                 ],
             }],

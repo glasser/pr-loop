@@ -98,6 +98,19 @@ pub enum Command {
     /// Show CI check status and failure logs.
     /// Does not modify the PR or post comments. Works on any PR (draft or not).
     Checks,
+
+    /// Launch a local web UI showing unresolved review threads and PR commits.
+    /// Auto-opens a browser tab. Polls GitHub periodically and immediately on
+    /// local git ref changes or replies from the UI / `pr-loop reply`.
+    Web {
+        /// TCP port to bind on (default: random free port).
+        #[arg(long)]
+        port: Option<u16>,
+
+        /// Don't auto-open a browser window; just print the URL.
+        #[arg(long)]
+        no_open: bool,
+    },
 }
 
 #[cfg(test)]
@@ -355,6 +368,30 @@ mod tests {
                 assert!(reviewer.is_empty());
             }
             _ => panic!("Expected Ready command"),
+        }
+    }
+
+    #[test]
+    fn parse_web_command() {
+        let cli = Cli::parse_from(["pr-loop", "web"]);
+        match cli.command {
+            Some(Command::Web { port, no_open }) => {
+                assert!(port.is_none());
+                assert!(!no_open);
+            }
+            _ => panic!("Expected Web command"),
+        }
+    }
+
+    #[test]
+    fn parse_web_command_with_options() {
+        let cli = Cli::parse_from(["pr-loop", "web", "--port", "8080", "--no-open"]);
+        match cli.command {
+            Some(Command::Web { port, no_open }) => {
+                assert_eq!(port, Some(8080));
+                assert!(no_open);
+            }
+            _ => panic!("Expected Web command"),
         }
     }
 

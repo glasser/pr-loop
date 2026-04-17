@@ -24,6 +24,15 @@ anyhow = "1"
 # Glob pattern matching for check filtering
 glob = "0.3"
 
+# HTTP server for `pr-loop web`
+tiny_http = "0.12"
+
+# Cross-platform browser opener for `pr-loop web`
+open = "5"
+
+# URL-safe percent encoding (for port-file paths and URL components)
+urlencoding = "2"
+
 [dev-dependencies]
 # Testing utilities
 tokio-test = "0.4"

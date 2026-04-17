@@ -79,6 +79,9 @@ mod tests {
             id: format!("comment_{}", body.len()),
             author: author.to_string(),
             body: body.to_string(),
+            diff_hunk: None,
+            url: None,
+            created_at: None,
         }
     }
 
@@ -86,6 +89,7 @@ mod tests {
         ReviewThread {
             id: id.to_string(),
             is_resolved: resolved,
+            is_outdated: false,
             path: Some("src/main.rs".to_string()),
             line: Some(42),
             comments,

@@ -5,6 +5,7 @@ mod analysis;
 mod checks;
 mod circleci;
 mod cli;
+mod commits;
 mod credentials;
 mod git;
 mod github;
@@ -14,6 +15,7 @@ mod pr;
 mod reply;
 mod threads;
 mod wait;
+mod web;
 
 use analysis::{analyze_pr, NextAction};
 use checks::{get_checks_summary, CheckStatus, ChecksSummary, RealChecksClient};
@@ -148,6 +150,10 @@ fn main() {
                     if !newer_comments.is_empty() {
                         print_newer_comments(&newer_comments, &thread_id);
                     }
+
+                    // Poke a running `pr-loop web` instance so its UI
+                    // refreshes immediately. Best-effort, ignore failures.
+                    web::poke_running_server(&pr_context);
                 }
                 Err(e) => {
                     eprintln!("Error: Failed to post reply: {}", e);
@@ -178,6 +184,13 @@ fn main() {
                 &cli.include_checks,
                 &cli.exclude_checks,
             );
+        }
+
+        Some(Command::Web { port, no_open }) => {
+            if let Err(e) = web::run(&pr_context, port, no_open) {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
 
         None => {

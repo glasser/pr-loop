@@ -17,6 +17,7 @@ pub trait ReplyClient {
     fn post_reply(&self, thread_id: &str, body: &str) -> Result<ReplyResult>;
     fn delete_comment(&self, comment_id: &str) -> Result<()>;
     fn update_comment(&self, comment_id: &str, body: &str) -> Result<()>;
+    fn resolve_thread(&self, thread_id: &str) -> Result<()>;
 }
 
 /// Real client that uses `gh api graphql`.
@@ -33,6 +34,10 @@ impl ReplyClient for RealReplyClient {
 
     fn update_comment(&self, comment_id: &str, body: &str) -> Result<()> {
         update_comment_graphql(comment_id, body)
+    }
+
+    fn resolve_thread(&self, thread_id: &str) -> Result<()> {
+        resolve_thread_graphql(thread_id)
     }
 }
 
@@ -165,6 +170,31 @@ fn update_comment_graphql(comment_id: &str, body: &str) -> Result<()> {
     Ok(())
 }
 
+/// GraphQL mutation for resolving a review thread (loaded from graphql/operation/).
+const RESOLVE_THREAD_MUTATION: &str = include_str!("../graphql/operation/resolve_thread.graphql");
+
+/// Resolve a review thread using GraphQL.
+fn resolve_thread_graphql(thread_id: &str) -> Result<()> {
+    let output = Command::new("gh")
+        .args([
+            "api",
+            "graphql",
+            "-f",
+            &format!("query={}", RESOLVE_THREAD_MUTATION),
+            "-f",
+            &format!("threadId={}", thread_id),
+        ])
+        .output()
+        .context("Failed to run 'gh api graphql' for resolve thread")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("GraphQL mutation failed: {}", stderr.trim());
+    }
+
+    Ok(())
+}
+
 /// Format the message with the Claude marker prefix.
 pub fn format_claude_message(message: &str) -> String {
     format!("{} {}", CLAUDE_MARKER, message)
@@ -199,6 +229,14 @@ mod tests {
         }
 
         fn update_comment(&self, _comment_id: &str, _body: &str) -> Result<()> {
+            if self.should_fail {
+                anyhow::bail!("Test failure")
+            } else {
+                Ok(())
+            }
+        }
+
+        fn resolve_thread(&self, _thread_id: &str) -> Result<()> {
             if self.should_fail {
                 anyhow::bail!("Test failure")
             } else {

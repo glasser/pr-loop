@@ -5,6 +5,7 @@ query FetchThreads($owner: String!, $repo: String!, $pr: Int!, $cursor: String) 
                 nodes {
                     id
                     isResolved
+                    isOutdated
                     path
                     line
                     comments(first: 100) {
@@ -14,6 +15,9 @@ query FetchThreads($owner: String!, $repo: String!, $pr: Int!, $cursor: String) 
                                 login
                             }
                             body
+                            diffHunk
+                            url
+                            createdAt
                         }
                         pageInfo {
                             hasNextPage
