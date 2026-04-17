@@ -334,7 +334,8 @@ fn fetch_now(
     match (threads_result, commits_result) {
         (Ok(threads), Ok(commits)) => {
             state.threads = threads.iter().map(ThreadDto::from).collect();
-            state.commits = commits.iter().map(CommitDto::from).collect();
+            // GitHub returns commits oldest-first; UI shows newest on top.
+            state.commits = commits.iter().rev().map(CommitDto::from).collect();
             state.last_error = None;
         }
         (Err(e), _) | (_, Err(e)) => {
