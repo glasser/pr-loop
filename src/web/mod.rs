@@ -79,8 +79,8 @@ impl From<&ReviewThread> for ThreadDto {
 
 #[derive(Clone, Serialize)]
 struct CommitDto {
-    oid: String,
-    abbreviated_oid: String,
+    sha: String,
+    abbreviated_sha: String,
     message_headline: String,
     committed_date: String,
     author_name: Option<String>,
@@ -91,8 +91,8 @@ struct CommitDto {
 impl From<&PrCommit> for CommitDto {
     fn from(c: &PrCommit) -> Self {
         Self {
-            oid: c.oid.clone(),
-            abbreviated_oid: c.abbreviated_oid.clone(),
+            sha: c.sha.clone(),
+            abbreviated_sha: c.abbreviated_sha.clone(),
             message_headline: c.message_headline.clone(),
             committed_date: c.committed_date.clone(),
             author_name: c.author_name.clone(),

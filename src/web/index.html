@@ -127,7 +127,7 @@
     font-size: 12px;
     margin-top: 2px;
   }
-  .commit .oid {
+  .commit .sha {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 11px;
   }
@@ -493,7 +493,7 @@ function Thread({ thread, onPoke }) {
 function Commit({ commit, isNew, onDismiss }) {
   const ago = relativeTime(commit.committed_date);
   const author = commit.author_login || commit.author_name || '';
-  const dismiss = () => { if (isNew) onDismiss(commit.oid); };
+  const dismiss = () => { if (isNew) onDismiss(commit.sha); };
   return html`
     <div class=${'commit' + (isNew ? ' new' : '')}>
       <a class="title" href=${commit.url} target="_blank"
@@ -501,7 +501,7 @@ function Commit({ commit, isNew, onDismiss }) {
         ${commit.message_headline}
       </a>
       <div class="meta">
-        <span class="oid">${commit.abbreviated_oid}</span>${author ? ' · ' + author : ''}${' · '}${ago}
+        <span class="sha">${commit.abbreviated_sha}</span>${author ? ' · ' + author : ''}${' · '}${ago}
       </div>
     </div>
   `;
@@ -511,8 +511,8 @@ function App() {
   const [data, setData] = useState(null);
   const [failures, setFailures] = useState(0);
   // Commits present on first data load — anything seen after is "new".
-  const initialCommitOids = useRef(null);
-  const [newCommitOids, setNewCommitOids] = useState(() => new Set());
+  const seenCommitShas = useRef(null);
+  const [newCommitShas, setNewCommitShas] = useState(() => new Set());
   // Tick every 10s so relative times stay fresh even without a data change.
   useTick(10000);
 
@@ -534,31 +534,35 @@ function App() {
     return () => clearInterval(id);
   }, []);
 
-  // Track freshly-arrived commits.
+  // Track freshly-arrived commits. Wait for the server's first successful
+  // GitHub fetch (last_fetched_at populated) before baselining — otherwise
+  // the first poll may see an empty commits list and then flag everything
+  // as "new" when the real fetch completes.
   useEffect(() => {
-    if (!data) return;
-    const oids = (data.commits || []).map(c => c.oid);
-    if (initialCommitOids.current === null) {
-      initialCommitOids.current = new Set(oids);
+    if (!data || !data.last_fetched_at) return;
+    const shas = (data.commits || []).map(c => c.sha);
+    if (seenCommitShas.current === null) {
+      seenCommitShas.current = new Set(shas);
       return;
     }
-    const toAdd = oids.filter(
-      o => !initialCommitOids.current.has(o) && !newCommitOids.has(o)
-    );
+    const toAdd = shas.filter(s => !seenCommitShas.current.has(s));
     if (toAdd.length) {
-      setNewCommitOids(prev => {
+      setNewCommitShas(prev => {
         const next = new Set(prev);
-        toAdd.forEach(o => next.add(o));
+        toAdd.forEach(s => next.add(s));
         return next;
       });
     }
   }, [data]);
 
-  const dismissCommit = (oid) => {
-    setNewCommitOids(prev => {
-      if (!prev.has(oid)) return prev;
+  // Dismiss a new-commit highlight. Also mark the SHA as seen so the next
+  // poll's diff doesn't treat it as new again.
+  const dismissCommit = (sha) => {
+    if (seenCommitShas.current) seenCommitShas.current.add(sha);
+    setNewCommitShas(prev => {
+      if (!prev.has(sha)) return prev;
       const next = new Set(prev);
-      next.delete(oid);
+      next.delete(sha);
       return next;
     });
   };
@@ -596,9 +600,9 @@ function App() {
               ? html`<div class="commit"><span class="meta">No commits</span></div>`
               : data.commits.map(c => html`<${Commit}
                   commit=${c}
-                  isNew=${newCommitOids.has(c.oid)}
+                  isNew=${newCommitShas.has(c.sha)}
                   onDismiss=${dismissCommit}
-                  key=${c.oid}
+                  key=${c.sha}
                 />`)}
           </div>
         </div>

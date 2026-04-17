@@ -7,8 +7,8 @@ use std::process::Command;
 /// A commit on a PR.
 #[derive(Debug, Clone)]
 pub struct PrCommit {
-    pub oid: String,
-    pub abbreviated_oid: String,
+    pub sha: String,
+    pub abbreviated_sha: String,
     pub message_headline: String,
     pub committed_date: String,
     pub author_name: Option<String>,
@@ -152,8 +152,8 @@ fn fetch_commits_from_graphql(owner: &str, repo: &str, pr_number: u64) -> Result
 
         for n in connection.nodes {
             all_commits.push(PrCommit {
-                oid: n.commit.oid,
-                abbreviated_oid: n.commit.abbreviated_oid,
+                sha: n.commit.oid,
+                abbreviated_sha: n.commit.abbreviated_oid,
                 message_headline: n.commit.message_headline,
                 committed_date: n.commit.committed_date,
                 author_name: n.commit.author.as_ref().and_then(|a| a.name.clone()),
