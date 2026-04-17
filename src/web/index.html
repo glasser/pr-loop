@@ -5,12 +5,6 @@
 <title>pr-loop web</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@5/github-markdown.min.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github.min.css">
-<script src="https://cdn.jsdelivr.net/npm/marked@14/marked.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/marked-highlight@2/lib/index.umd.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@joeattardi/emoji-button@4/dist/index.js" onerror="/* optional */"></script>
-<script src="https://cdn.jsdelivr.net/npm/markdown-it@14/dist/markdown-it.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/markdown-it-emoji@3/dist/markdown-it-emoji.min.js"></script>
 <style>
   :root {
     --bg: #ffffff;
@@ -65,7 +59,7 @@
     border-bottom: 1px solid var(--danger-fg);
   }
   #connection-banner.visible { display: block; }
-  body.banner-visible #layout { padding-top: 36px; }
+  .banner-visible > #header { margin-top: 36px; }
   #header {
     padding: 12px 16px;
     border-bottom: 1px solid var(--border);
@@ -290,268 +284,258 @@
 </style>
 </head>
 <body>
-  <div id="connection-banner">⚠ Lost connection to pr-loop server. Is it still running?</div>
+<div id="root"></div>
 
-  <div id="header">
-    <h1 id="pr-title">Loading…</h1>
-    <div class="meta" id="pr-meta"></div>
-  </div>
+<script type="module">
+import { h, render } from 'https://esm.sh/preact@10.22.0';
+import { useState, useEffect } from 'https://esm.sh/preact@10.22.0/hooks';
+import htm from 'https://esm.sh/htm@3.1.1';
+import MarkdownIt from 'https://esm.sh/markdown-it@14.1.0';
+import { full as markdownItEmoji } from 'https://esm.sh/markdown-it-emoji@3.0.0';
+import hljs from 'https://esm.sh/highlight.js@11.10.0';
 
-  <div id="layout">
-    <div id="threads"><div class="empty">Loading…</div></div>
-    <div id="commits-panel">
-      <h2>Commits</h2>
-      <div id="commits"></div>
+const html = htm.bind(h);
+
+const md = new MarkdownIt({ html: false, linkify: true, breaks: true });
+md.use(markdownItEmoji);
+const origFence = md.renderer.rules.fence || ((t, i, o, e, s) => s.renderToken(t, i, o));
+md.renderer.rules.fence = (tokens, idx, options, env, self) => {
+  const token = tokens[idx];
+  const lang = (token.info || '').trim().split(/\s+/g)[0];
+  if (lang && hljs.getLanguage(lang)) {
+    try {
+      const code = hljs.highlight(token.content, { language: lang, ignoreIllegals: true }).value;
+      return `<pre><code class="hljs language-${lang}">${code}</code></pre>`;
+    } catch (_) {}
+  }
+  return origFence(tokens, idx, options, env, self);
+};
+
+const CLAUDE_MARKER_RE = /^🤖 From Claude:\s?/;
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])
+  );
+}
+
+function relativeTime(iso) {
+  if (!iso) return '';
+  const then = new Date(iso).getTime();
+  const now = Date.now();
+  const secs = Math.round((now - then) / 1000);
+  if (secs < 0) return 'just now';
+  if (secs < 60) return `${secs}s ago`;
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
+
+function renderDiffHtml(hunk) {
+  const lines = hunk.split('\n');
+  return '<pre>' + lines.map(l => {
+    const cls = l.startsWith('+') && !l.startsWith('+++') ? 'diff-add'
+      : l.startsWith('-') && !l.startsWith('---') ? 'diff-del'
+      : l.startsWith('@@') ? 'diff-hunk-header' : '';
+    return cls ? `<span class="${cls}">${escapeHtml(l)}</span>` : escapeHtml(l);
+  }).join('\n') + '</pre>';
+}
+
+// Force periodic re-render for relative-time updates.
+function useTick(intervalMs) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick(t => t + 1), intervalMs);
+    return () => clearInterval(id);
+  }, [intervalMs]);
+}
+
+function Comment({ c }) {
+  const rawBody = c.body || '';
+  const claudeMatch = rawBody.match(CLAUDE_MARKER_RE);
+  const isClaude = !!claudeMatch;
+  const displayBody = isClaude ? rawBody.slice(claudeMatch[0].length) : rawBody;
+  const bodyHtml = md.render(displayBody);
+  const ago = relativeTime(c.created_at);
+  return html`
+    <div class="comment ${isClaude ? 'claude' : ''}">
+      <div class="comment-meta">
+        <span class="author">
+          ${isClaude
+            ? html`🤖 Claude <span class="via">via @${c.author}</span>`
+            : html`@${c.author}`}
+        </span>
+        <span>·</span>
+        ${c.url
+          ? html`<a href=${c.url} target="_blank">${ago || 'link'}</a>`
+          : ago}
+      </div>
+      <div class="comment-body markdown-body" dangerouslySetInnerHTML=${{ __html: bodyHtml }}></div>
     </div>
-  </div>
+  `;
+}
 
-<script>
-(function() {
-  const md = window.markdownit({ html: false, linkify: true, breaks: true });
-  if (window.markdownitEmoji) {
-    md.use(window.markdownitEmoji.full || window.markdownitEmoji.default || window.markdownitEmoji);
-  }
-  // Monkey-patch fence renderer to use highlight.js
-  const origFence = md.renderer.rules.fence || function(t,i,o,e,s) { return s.renderToken(t,i,o); };
-  md.renderer.rules.fence = function(tokens, idx, options, env, self) {
-    const token = tokens[idx];
-    const info = token.info ? token.info.trim() : '';
-    const lang = info.split(/\s+/g)[0];
-    if (lang && hljs.getLanguage(lang)) {
-      try {
-        const highlighted = hljs.highlight(token.content, { language: lang, ignoreIllegals: true }).value;
-        return '<pre><code class="hljs language-' + lang + '">' + highlighted + '</code></pre>';
-      } catch (e) {}
-    }
-    return origFence(tokens, idx, options, env, self);
-  };
+function Thread({ thread, onPoke }) {
+  const [reply, setReply] = useState('');
+  const [posting, setPosting] = useState(false);
+  const [resolving, setResolving] = useState(false);
 
-  let consecutiveFailures = 0;
-  let lastData = null;
+  const diffHunk = thread.comments[0] && thread.comments[0].diff_hunk;
+  const firstCommentUrl = thread.comments[0] && thread.comments[0].url;
+  const location = thread.path
+    ? (thread.line ? `${thread.path}:${thread.line}` : thread.path)
+    : 'unknown location';
 
-  function setConnectionBanner(visible) {
-    const banner = document.getElementById('connection-banner');
-    banner.classList.toggle('visible', visible);
-    document.body.classList.toggle('banner-visible', visible);
-  }
-
-  function relativeTime(iso) {
-    if (!iso) return '';
-    const then = new Date(iso).getTime();
-    const now = Date.now();
-    const secs = Math.round((now - then) / 1000);
-    if (secs < 0) return 'just now';
-    if (secs < 60) return secs + 's ago';
-    const mins = Math.round(secs / 60);
-    if (mins < 60) return mins + 'm ago';
-    const hours = Math.round(mins / 60);
-    if (hours < 24) return hours + 'h ago';
-    const days = Math.round(hours / 24);
-    return days + 'd ago';
-  }
-
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, c =>
-      ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])
-    );
-  }
-
-  function renderDiff(hunk) {
-    if (!hunk) return '';
-    const lines = hunk.split('\n');
-    return '<pre>' + lines.map(l => {
-      const cls = l.startsWith('+') && !l.startsWith('+++') ? 'diff-add'
-                : l.startsWith('-') && !l.startsWith('---') ? 'diff-del'
-                : l.startsWith('@@') ? 'diff-hunk-header' : '';
-      return cls
-        ? '<span class="' + cls + '">' + escapeHtml(l) + '</span>'
-        : escapeHtml(l);
-    }).join('\n') + '</pre>';
-  }
-
-  function renderThread(thread) {
-    const diffHunk = thread.comments[0] && thread.comments[0].diff_hunk;
-    const location = thread.path
-      ? (thread.line ? thread.path + ':' + thread.line : thread.path)
-      : 'unknown location';
-    const firstCommentUrl = thread.comments[0] && thread.comments[0].url;
-
-    const commentsHtml = thread.comments.map(c => {
-      const rawBody = c.body || '';
-      const claudeMatch = rawBody.match(/^🤖 From Claude:\s?/);
-      const isClaude = !!claudeMatch;
-      const displayBody = isClaude ? rawBody.slice(claudeMatch[0].length) : rawBody;
-      const bodyHtml = md.render(displayBody);
-      const ago = relativeTime(c.created_at);
-      const authorLink = c.url
-        ? '<a href="' + escapeHtml(c.url) + '" target="_blank">' + (ago || 'link') + '</a>'
-        : ago;
-      const authorLabel = isClaude
-        ? '🤖 Claude <span class="via">via @' + escapeHtml(c.author || '') + '</span>'
-        : '@' + escapeHtml(c.author || '');
-      return '<div class="comment' + (isClaude ? ' claude' : '') + '">'
-        + '<div class="comment-meta">'
-        +   '<span class="author">' + authorLabel + '</span>'
-        +   '<span>·</span>'
-        +   authorLink
-        + '</div>'
-        + '<div class="comment-body markdown-body">' + bodyHtml + '</div>'
-        + '</div>';
-    }).join('');
-
-    const outdatedBadge = thread.is_outdated ? '<span class="badge">outdated</span>' : '';
-    const locationLink = firstCommentUrl
-      ? '<a class="location" href="' + escapeHtml(firstCommentUrl) + '" target="_blank">' + escapeHtml(location) + '</a>'
-      : '<span class="location">' + escapeHtml(location) + '</span>';
-
-    return '<div class="thread' + (thread.is_outdated ? ' outdated' : '') + '" data-thread-id="' + escapeHtml(thread.id) + '">'
-      + '<div class="thread-header">'
-      +   locationLink
-      +   outdatedBadge
-      +   '<div class="actions">'
-      +     '<button class="resolve-btn">Resolve</button>'
-      +   '</div>'
-      + '</div>'
-      + '<div class="thread-body' + (diffHunk ? '' : ' no-diff') + '">'
-      +   '<div class="thread-comments">' + commentsHtml + '</div>'
-      +   (diffHunk ? '<div class="thread-diff">' + renderDiff(diffHunk) + '</div>' : '')
-      + '</div>'
-      + '<div class="reply-box">'
-      +   '<textarea placeholder="Reply as yourself…"></textarea>'
-      +   '<div class="actions">'
-      +     '<button class="reply-btn primary">Reply</button>'
-      +     '<span class="hint">Cmd/Ctrl+Enter</span>'
-      +   '</div>'
-      + '</div>'
-      + '</div>';
-  }
-
-  function renderCommits(commits) {
-    if (!commits || commits.length === 0) {
-      return '<div class="commit"><span class="meta">No commits</span></div>';
-    }
-    return commits.map(c => {
-      const ago = relativeTime(c.committed_date);
-      const author = c.author_login || c.author_name || '';
-      return '<div class="commit">'
-        + '<a class="title" href="' + escapeHtml(c.url) + '" target="_blank">' + escapeHtml(c.message_headline) + '</a>'
-        + '<div class="meta">'
-        +   '<span class="oid">' + escapeHtml(c.abbreviated_oid) + '</span>'
-        +   (author ? ' · ' + escapeHtml(author) : '')
-        +   ' · <span data-ts="' + escapeHtml(c.committed_date) + '">' + ago + '</span>'
-        + '</div>'
-        + '</div>';
-    }).join('');
-  }
-
-  function render(data) {
-    lastData = data;
-    const title = data.pr.owner + '/' + data.pr.repo + ' #' + data.pr.pr_number;
-    document.getElementById('pr-title').textContent = title;
-
-    const metaBits = [];
-    if (data.last_fetched_at) {
-      metaBits.push('last fetched ' + relativeTime(data.last_fetched_at));
-    }
-    if (data.last_error) {
-      metaBits.push('⚠ ' + data.last_error);
-    }
-    document.getElementById('pr-meta').textContent = metaBits.join(' · ');
-
-    const threads = (data.threads || []).filter(t => !t.is_resolved && !t.is_paperclip);
-    const threadsEl = document.getElementById('threads');
-    if (threads.length === 0) {
-      threadsEl.innerHTML = '<div class="empty"><div class="big">🎉</div>No unresolved review threads.</div>';
-    } else {
-      threadsEl.innerHTML = threads.map(renderThread).join('');
-    }
-
-    document.getElementById('commits').innerHTML = renderCommits(data.commits);
-  }
-
-  function updateRelativeTimes() {
-    document.querySelectorAll('[data-ts]').forEach(el => {
-      el.textContent = relativeTime(el.getAttribute('data-ts'));
-    });
-    if (lastData) {
-      const metaBits = [];
-      if (lastData.last_fetched_at) metaBits.push('last fetched ' + relativeTime(lastData.last_fetched_at));
-      if (lastData.last_error) metaBits.push('⚠ ' + lastData.last_error);
-      document.getElementById('pr-meta').textContent = metaBits.join(' · ');
+  async function doResolve() {
+    setResolving(true);
+    try {
+      const res = await fetch(`/api/threads/${encodeURIComponent(thread.id)}/resolve`, { method: 'POST' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      onPoke();
+    } catch (e) {
+      alert(`Failed to resolve: ${e.message}`);
+      setResolving(false);
     }
   }
+
+  async function doReply() {
+    const body = reply.trim();
+    if (!body) return;
+    setPosting(true);
+    try {
+      const res = await fetch(`/api/threads/${encodeURIComponent(thread.id)}/reply`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ body })
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setReply('');
+      onPoke();
+    } catch (e) {
+      alert(`Failed to reply: ${e.message}`);
+    } finally {
+      setPosting(false);
+    }
+  }
+
+  return html`
+    <div class="thread ${thread.is_outdated ? 'outdated' : ''}">
+      <div class="thread-header">
+        ${firstCommentUrl
+          ? html`<a class="location" href=${firstCommentUrl} target="_blank">${location}</a>`
+          : html`<span class="location">${location}</span>`}
+        ${thread.is_outdated && html`<span class="badge">outdated</span>`}
+        <div class="actions">
+          <button onClick=${doResolve} disabled=${resolving}>
+            ${resolving ? 'Resolving…' : 'Resolve'}
+          </button>
+        </div>
+      </div>
+      <div class="thread-body ${diffHunk ? '' : 'no-diff'}">
+        <div class="thread-comments">
+          ${thread.comments.map(c => html`<${Comment} c=${c} key=${c.id} />`)}
+        </div>
+        ${diffHunk && html`<div class="thread-diff" dangerouslySetInnerHTML=${{ __html: renderDiffHtml(diffHunk) }}></div>`}
+      </div>
+      <div class="reply-box">
+        <textarea
+          placeholder="Reply as yourself…"
+          value=${reply}
+          onInput=${(e) => setReply(e.target.value)}
+          onKeyDown=${(e) => {
+            if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') doReply();
+          }}
+        ></textarea>
+        <div class="actions">
+          <button class="primary" onClick=${doReply} disabled=${posting || !reply.trim()}>
+            ${posting ? 'Posting…' : 'Reply'}
+          </button>
+          <span class="hint">Cmd/Ctrl+Enter</span>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function Commit({ commit }) {
+  const ago = relativeTime(commit.committed_date);
+  const author = commit.author_login || commit.author_name || '';
+  return html`
+    <div class="commit">
+      <a class="title" href=${commit.url} target="_blank">${commit.message_headline}</a>
+      <div class="meta">
+        <span class="oid">${commit.abbreviated_oid}</span>${author ? ' · ' + author : ''}${' · '}${ago}
+      </div>
+    </div>
+  `;
+}
+
+function App() {
+  const [data, setData] = useState(null);
+  const [failures, setFailures] = useState(0);
+  // Tick every 10s so relative times stay fresh even without a data change.
+  useTick(10000);
 
   async function poll() {
     try {
       const res = await fetch('/api/state');
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const data = await res.json();
-      consecutiveFailures = 0;
-      setConnectionBanner(false);
-      render(data);
-    } catch (e) {
-      consecutiveFailures++;
-      if (consecutiveFailures >= 3) setConnectionBanner(true);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const d = await res.json();
+      setData(d);
+      setFailures(0);
+    } catch (_) {
+      setFailures(f => f + 1);
     }
   }
 
-  document.addEventListener('click', async (ev) => {
-    const btn = ev.target.closest('button');
-    if (!btn) return;
-    const threadEl = btn.closest('.thread');
-    if (!threadEl) return;
-    const threadId = threadEl.getAttribute('data-thread-id');
+  useEffect(() => {
+    poll();
+    const id = setInterval(poll, 1000);
+    return () => clearInterval(id);
+  }, []);
 
-    if (btn.classList.contains('resolve-btn')) {
-      btn.disabled = true;
-      btn.textContent = 'Resolving…';
-      try {
-        const res = await fetch('/api/threads/' + encodeURIComponent(threadId) + '/resolve', { method: 'POST' });
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        poll();
-      } catch (e) {
-        btn.disabled = false;
-        btn.textContent = 'Resolve';
-        alert('Failed to resolve: ' + e.message);
-      }
-    } else if (btn.classList.contains('reply-btn')) {
-      const ta = threadEl.querySelector('.reply-box textarea');
-      const body = (ta.value || '').trim();
-      if (!body) return;
-      btn.disabled = true;
-      btn.textContent = 'Posting…';
-      try {
-        const res = await fetch('/api/threads/' + encodeURIComponent(threadId) + '/reply', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ body })
-        });
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        ta.value = '';
-        poll();
-      } catch (e) {
-        alert('Failed to reply: ' + e.message);
-      } finally {
-        btn.disabled = false;
-        btn.textContent = 'Reply';
-      }
-    }
-  });
+  if (!data) {
+    return html`<div class="empty">Loading…</div>`;
+  }
 
-  document.addEventListener('keydown', (ev) => {
-    if ((ev.metaKey || ev.ctrlKey) && ev.key === 'Enter') {
-      const ta = ev.target.closest('.reply-box textarea');
-      if (ta) {
-        const btn = ta.closest('.reply-box').querySelector('.reply-btn');
-        if (btn && !btn.disabled) btn.click();
-      }
-    }
-  });
+  const connectionLost = failures >= 3;
+  const threads = (data.threads || []).filter(t => !t.is_resolved && !t.is_paperclip);
 
-  poll();
-  setInterval(poll, 1000);
-  setInterval(updateRelativeTimes, 10000);
-})();
+  const metaBits = [];
+  if (data.last_fetched_at) metaBits.push(`last fetched ${relativeTime(data.last_fetched_at)}`);
+  if (data.last_error) metaBits.push(`⚠ ${data.last_error}`);
+
+  return html`
+    <div id="connection-banner" class=${connectionLost ? 'visible' : ''}>
+      ⚠ Lost connection to pr-loop server. Is it still running?
+    </div>
+    <div class=${connectionLost ? 'banner-visible' : ''}>
+      <div id="header">
+        <h1>${data.pr.owner}/${data.pr.repo} #${data.pr.pr_number}</h1>
+        <div class="meta">${metaBits.join(' · ')}</div>
+      </div>
+      <div id="layout">
+        <div id="threads">
+          ${threads.length === 0
+            ? html`<div class="empty"><div class="big">🎉</div>No unresolved review threads.</div>`
+            : threads.map(t => html`<${Thread} thread=${t} onPoke=${poll} key=${t.id} />`)}
+        </div>
+        <div id="commits-panel">
+          <h2>Commits</h2>
+          <div id="commits">
+            ${(data.commits || []).length === 0
+              ? html`<div class="commit"><span class="meta">No commits</span></div>`
+              : data.commits.map(c => html`<${Commit} commit=${c} key=${c.oid} />`)}
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+render(h(App), document.getElementById('root'));
 </script>
 </body>
 </html>
