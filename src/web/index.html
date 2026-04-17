@@ -98,6 +98,11 @@
     background: var(--accent);
     animation: cc-pulse 1.4s ease-in-out infinite;
   }
+  #cc-strip.thinking .dot {
+    background: transparent;
+    box-shadow: inset 0 0 0 2px var(--accent);
+    animation: cc-pulse 1.4s ease-in-out infinite;
+  }
   #cc-strip.idle .dot {
     background: var(--border);
     animation: none;
@@ -429,6 +434,20 @@ function relativeTime(iso) {
   return `${Math.round(hours / 24)}d ago`;
 }
 
+// Elapsed duration without the "ago" suffix, for things that are still running.
+function elapsed(iso) {
+  if (!iso) return '';
+  const then = new Date(iso).getTime();
+  const now = Date.now();
+  const secs = Math.max(0, Math.round((now - then) / 1000));
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.round(hours / 24)}d`;
+}
+
 function renderDiffHtml(hunk) {
   const lines = hunk.split('\n');
   return '<pre>' + lines.map(l => {
@@ -566,8 +585,7 @@ function CcStrip({ status }) {
       </div>
     `;
   }
-  const tools = status.in_flight || [];
-  const idle = tools.length === 0;
+  const activity = status.activity || (status.in_flight && status.in_flight.length ? 'running' : 'idle');
   const lastActivity = status.last_activity_at ? relativeTime(status.last_activity_at) : null;
   const lastText = status.last_assistant_text;
   const lastTextRow = lastText
@@ -576,33 +594,46 @@ function CcStrip({ status }) {
            </div>`
     : null;
 
-  if (idle) {
+  if (activity === 'running') {
+    const tools = status.in_flight || [];
+    // Show primary tool (most recent) + any others as a count.
+    const primary = tools[tools.length - 1];
+    const others = tools.length - 1;
+    const runningFor = elapsed(primary.started_at);
     return html`
-      <div id="cc-strip" class="idle">
+      <div id="cc-strip" class="running">
         <div class="row">
           <span class="dot"></span>
-          <span>Claude Code idle${lastActivity ? ` — last activity ${lastActivity}` : ''}</span>
+          <span>Claude Code <b>running</b></span>
+          <span class="tool">${primary.name}</span>
+          ${primary.is_sidechain && html`<span class="sidechain">subagent</span>`}
+          ${primary.preview && html`<span class="preview" title=${primary.preview}>${primary.preview}</span>`}
+          <span class="spacer"></span>
+          <span>for ${runningFor}${others > 0 ? ` · +${others} more` : ''}</span>
         </div>
         ${lastTextRow}
       </div>
     `;
   }
 
-  // Show primary tool (most recent) + any others as a count.
-  const primary = tools[tools.length - 1];
-  const others = tools.length - 1;
-  const runningFor = relativeTime(primary.started_at);
+  if (activity === 'thinking') {
+    return html`
+      <div id="cc-strip" class="thinking">
+        <div class="row">
+          <span class="dot"></span>
+          <span>Claude Code <b>thinking</b>…${lastActivity ? ` (${lastActivity})` : ''}</span>
+        </div>
+        ${lastTextRow}
+      </div>
+    `;
+  }
 
+  // idle
   return html`
-    <div id="cc-strip">
+    <div id="cc-strip" class="idle">
       <div class="row">
         <span class="dot"></span>
-        <span>Claude Code running</span>
-        <span class="tool">${primary.name}</span>
-        ${primary.is_sidechain && html`<span class="sidechain">subagent</span>`}
-        ${primary.preview && html`<span class="preview" title=${primary.preview}>${primary.preview}</span>`}
-        <span class="spacer"></span>
-        <span>${runningFor}${others > 0 ? ` · +${others} more` : ''}</span>
+        <span>Claude Code <b>idle</b>${lastActivity ? ` — last activity ${lastActivity}` : ''}</span>
       </div>
       ${lastTextRow}
     </div>

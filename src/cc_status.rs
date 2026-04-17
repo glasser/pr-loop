@@ -14,7 +14,6 @@
 
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -31,7 +30,21 @@ pub struct InFlightTool {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CcActivity {
+    /// At least one tool is currently running.
+    Running,
+    /// Assistant is generating a response (last event is a user message with
+    /// no assistant event following).
+    Thinking,
+    /// Last event was an assistant message with no pending tool — CC is done
+    /// with its turn and waiting for a new user prompt.
+    Idle,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct CcStatus {
+    pub activity: CcActivity,
     pub in_flight: Vec<InFlightTool>,
     pub last_activity_at: Option<String>,
     pub last_assistant_text: Option<String>,
@@ -87,92 +100,158 @@ fn read_tail(path: &Path, max_bytes: u64) -> std::io::Result<String> {
 }
 
 fn parse_events(content: &str) -> CcStatus {
-    // Track tool_use blocks whose matching tool_result we haven't seen yet.
-    let mut in_flight: HashMap<String, InFlightTool> = HashMap::new();
-    let mut last_activity_at: Option<String> = None;
-    let mut last_assistant_text: Option<String> = None;
+    // Parse every line into a Value (skipping junk).
+    let events: Vec<Value> = content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
 
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let v: Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
+    let last_activity_at = events
+        .iter()
+        .rev()
+        .find_map(|v| v.get("timestamp").and_then(|t| t.as_str()).map(str::to_string));
 
-        if let Some(ts) = v.get("timestamp").and_then(|t| t.as_str()) {
-            last_activity_at = Some(ts.to_string());
-        }
-        let timestamp = v
+    let last_assistant_text = find_last_assistant_text(&events);
+
+    // Find the most recent assistant event that contains tool_use blocks.
+    // Any earlier turn's tool_uses must have been resolved before the next
+    // assistant turn could begin, so they're not actually in-flight — just
+    // orphaned in a sliding 256KB window.
+    let mut in_flight: Vec<InFlightTool> = Vec::new();
+    if let Some(idx) = events.iter().rposition(|ev| {
+        ev.get("type").and_then(|t| t.as_str()) == Some("assistant")
+            && ev
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
+                })
+                .unwrap_or(false)
+    }) {
+        let turn = &events[idx];
+        let timestamp = turn
             .get("timestamp")
             .and_then(|t| t.as_str())
             .unwrap_or("")
             .to_string();
-        let is_sidechain = v
+        let is_sidechain = turn
             .get("isSidechain")
             .and_then(|s| s.as_bool())
             .unwrap_or(false);
-        let ev_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let Some(blocks) = turn
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_array())
+        else {
+            return CcStatus {
+                activity: CcActivity::Idle,
+                in_flight: vec![],
+                last_activity_at,
+                last_assistant_text,
+            };
+        };
 
-        let Some(content_arr) = v
+        // Collect the turn's tool_use ids and metadata.
+        let turn_tool_uses: Vec<(String, InFlightTool)> = blocks
+            .iter()
+            .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
+            .filter_map(|b| {
+                let id = b.get("id").and_then(|i| i.as_str())?.to_string();
+                let name = b
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("?")
+                    .to_string();
+                let preview = preview_for_tool(&name, b.get("input"));
+                Some((
+                    id,
+                    InFlightTool {
+                        name,
+                        started_at: timestamp.clone(),
+                        preview,
+                        is_sidechain,
+                    },
+                ))
+            })
+            .collect();
+
+        // Any tool_result in later events matches a tool_use_id.
+        let matched: std::collections::HashSet<String> = events[idx + 1..]
+            .iter()
+            .filter_map(|ev| {
+                ev.get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_array())
+            })
+            .flat_map(|arr| arr.iter())
+            .filter_map(|b| {
+                if b.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
+                    b.get("tool_use_id")
+                        .and_then(|i| i.as_str())
+                        .map(str::to_string)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for (id, tool) in turn_tool_uses {
+            if !matched.contains(&id) {
+                in_flight.push(tool);
+            }
+        }
+    }
+
+    let activity = if !in_flight.is_empty() {
+        CcActivity::Running
+    } else {
+        // Look at the last event's top-level type. If it's "user" (either a
+        // tool_result batch or a user text message), CC is generating its
+        // next response. If it's "assistant", the turn is complete.
+        match events
+            .last()
+            .and_then(|ev| ev.get("type").and_then(|t| t.as_str()))
+        {
+            Some("user") => CcActivity::Thinking,
+            _ => CcActivity::Idle,
+        }
+    };
+
+    CcStatus {
+        activity,
+        in_flight,
+        last_activity_at,
+        last_assistant_text,
+    }
+}
+
+fn find_last_assistant_text(events: &[Value]) -> Option<String> {
+    for ev in events.iter().rev() {
+        if ev.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+            continue;
+        }
+        let Some(arr) = ev
             .get("message")
             .and_then(|m| m.get("content"))
             .and_then(|c| c.as_array())
         else {
             continue;
         };
-
-        for block in content_arr {
-            let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
-            match (ev_type, block_type) {
-                ("assistant", "tool_use") => {
-                    let Some(id) = block.get("id").and_then(|i| i.as_str()) else {
-                        continue;
-                    };
-                    let name = block
-                        .get("name")
-                        .and_then(|n| n.as_str())
-                        .unwrap_or("?")
-                        .to_string();
-                    let preview = preview_for_tool(&name, block.get("input"));
-                    in_flight.insert(
-                        id.to_string(),
-                        InFlightTool {
-                            name,
-                            started_at: timestamp.clone(),
-                            preview,
-                            is_sidechain,
-                        },
-                    );
-                }
-                ("user", "tool_result") => {
-                    if let Some(id) = block.get("tool_use_id").and_then(|i| i.as_str()) {
-                        in_flight.remove(id);
+        for block in arr {
+            if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
+                    let trimmed = t.trim();
+                    if !trimmed.is_empty() {
+                        return Some(truncate(trimmed, 200));
                     }
                 }
-                ("assistant", "text") => {
-                    if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
-                        let trimmed = t.trim();
-                        if !trimmed.is_empty() {
-                            last_assistant_text = Some(truncate(trimmed, 200));
-                        }
-                    }
-                }
-                _ => {}
             }
         }
     }
-
-    let mut tools: Vec<InFlightTool> = in_flight.into_values().collect();
-    tools.sort_by(|a, b| a.started_at.cmp(&b.started_at));
-
-    CcStatus {
-        in_flight: tools,
-        last_activity_at,
-        last_assistant_text,
-    }
+    None
 }
 
 fn preview_for_tool(name: &str, input: Option<&Value>) -> Option<String> {
