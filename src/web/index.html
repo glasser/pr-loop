@@ -435,12 +435,6 @@ md.renderer.rules.fence = (tokens, idx, options, env, self) => {
 
 const CLAUDE_MARKER_RE = /^🤖 From Claude:\s?/;
 
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, c =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])
-  );
-}
-
 function relativeTime(iso) {
   if (!iso) return '';
   const then = new Date(iso).getTime();
@@ -469,23 +463,25 @@ function elapsed(iso) {
   return `${Math.round(hours / 24)}d`;
 }
 
-function renderDiffHtml(hunk) {
+function DiffHunk({ hunk }) {
   const lines = hunk.split('\n');
-  // Find the last non-empty, non-hunk-header line — that's the commented line
-  // per GitHub's convention.
+  // Last non-empty, non-hunk-header line is the commented line (GitHub convention).
   let targetIdx = -1;
   for (let i = lines.length - 1; i >= 0; i--) {
     const l = lines[i];
     if (l.trim() !== '' && !l.startsWith('@@')) { targetIdx = i; break; }
   }
-  return '<pre>' + lines.map((l, i) => {
-    const type = l.startsWith('+') && !l.startsWith('+++') ? 'diff-add'
-      : l.startsWith('-') && !l.startsWith('---') ? 'diff-del'
-      : l.startsWith('@@') ? 'diff-hunk-header' : '';
-    const target = i === targetIdx ? ' diff-target' : '';
-    const cls = (type + target).trim();
-    return cls ? `<span class="${cls}">${escapeHtml(l)}</span>` : escapeHtml(l);
-  }).join('\n') + '</pre>';
+  return html`<pre>${lines.map((l, i) => {
+    let cls = null;
+    if (l.startsWith('+') && !l.startsWith('+++')) cls = 'diff-add';
+    else if (l.startsWith('-') && !l.startsWith('---')) cls = 'diff-del';
+    else if (l.startsWith('@@')) cls = 'diff-hunk-header';
+    if (i === targetIdx) cls = (cls ? cls + ' ' : '') + 'diff-target';
+    const sep = i < lines.length - 1 ? '\n' : '';
+    return cls
+      ? html`<span class=${cls}>${l}</span>${sep}`
+      : html`${l}${sep}`;
+  })}</pre>`;
 }
 
 // Force periodic re-render for relative-time updates.
@@ -582,7 +578,7 @@ function Thread({ thread, onPoke }) {
         <div class="thread-comments">
           ${thread.comments.map(c => html`<${Comment} c=${c} key=${c.id} />`)}
         </div>
-        ${diffHunk && html`<div class="thread-diff" dangerouslySetInnerHTML=${{ __html: renderDiffHtml(diffHunk) }}></div>`}
+        ${diffHunk && html`<div class="thread-diff"><${DiffHunk} hunk=${diffHunk} /></div>`}
       </div>
       <div class="reply-box">
         <textarea
