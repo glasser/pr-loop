@@ -1,6 +1,8 @@
 query FetchCommits($owner: String!, $repo: String!, $pr: Int!, $cursor: String) {
     repository(owner: $owner, name: $repo) {
         pullRequest(number: $pr) {
+            title
+            url
             commits(first: 100, after: $cursor) {
                 nodes {
                     url

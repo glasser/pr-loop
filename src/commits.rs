@@ -17,16 +17,25 @@ pub struct PrCommit {
     pub url: String,
 }
 
+/// PR identity fields that come back from the commits query, since we're
+/// already making that call.
+#[derive(Debug, Clone)]
+pub struct PrInfo {
+    pub title: String,
+    pub url: String,
+    pub commits: Vec<PrCommit>,
+}
+
 /// Trait for fetching PR commits, allowing test implementations.
 pub trait CommitsClient {
-    fn fetch_commits(&self, owner: &str, repo: &str, pr_number: u64) -> Result<Vec<PrCommit>>;
+    fn fetch_pr_info(&self, owner: &str, repo: &str, pr_number: u64) -> Result<PrInfo>;
 }
 
 pub struct RealCommitsClient;
 
 impl CommitsClient for RealCommitsClient {
-    fn fetch_commits(&self, owner: &str, repo: &str, pr_number: u64) -> Result<Vec<PrCommit>> {
-        fetch_commits_from_graphql(owner, repo, pr_number)
+    fn fetch_pr_info(&self, owner: &str, repo: &str, pr_number: u64) -> Result<PrInfo> {
+        fetch_pr_info_from_graphql(owner, repo, pr_number)
     }
 }
 
@@ -54,6 +63,10 @@ struct RepositoryData {
 
 #[derive(Deserialize)]
 struct PullRequestData {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
     commits: CommitsConnection,
 }
 
@@ -103,9 +116,11 @@ struct UserNode {
 
 const FETCH_COMMITS_QUERY: &str = include_str!("../graphql/operation/fetch_commits.graphql");
 
-fn fetch_commits_from_graphql(owner: &str, repo: &str, pr_number: u64) -> Result<Vec<PrCommit>> {
+fn fetch_pr_info_from_graphql(owner: &str, repo: &str, pr_number: u64) -> Result<PrInfo> {
     let mut all_commits: Vec<PrCommit> = Vec::new();
     let mut cursor: Option<String> = None;
+    let mut title: Option<String> = None;
+    let mut url: Option<String> = None;
 
     loop {
         let mut args = vec![
@@ -143,12 +158,19 @@ fn fetch_commits_from_graphql(owner: &str, repo: &str, pr_number: u64) -> Result
             anyhow::bail!("GraphQL errors: {}", messages.join(", "));
         }
 
-        let connection = response
+        let pr = response
             .data
             .and_then(|d| d.repository)
             .and_then(|r| r.pull_request)
-            .map(|p| p.commits)
             .ok_or_else(|| anyhow::anyhow!("PR not found or no access"))?;
+
+        if title.is_none() {
+            title = pr.title;
+        }
+        if url.is_none() {
+            url = pr.url;
+        }
+        let connection = pr.commits;
 
         for n in connection.nodes {
             all_commits.push(PrCommit {
@@ -172,7 +194,11 @@ fn fetch_commits_from_graphql(owner: &str, repo: &str, pr_number: u64) -> Result
         cursor = connection.page_info.end_cursor;
     }
 
-    Ok(all_commits)
+    Ok(PrInfo {
+        title: title.unwrap_or_default(),
+        url: url.unwrap_or_default(),
+        commits: all_commits,
+    })
 }
 
 #[cfg(test)]
@@ -180,12 +206,12 @@ pub mod tests {
     use super::*;
 
     pub struct TestCommitsClient {
-        pub commits: Vec<PrCommit>,
+        pub info: PrInfo,
     }
 
     impl CommitsClient for TestCommitsClient {
-        fn fetch_commits(&self, _owner: &str, _repo: &str, _pr: u64) -> Result<Vec<PrCommit>> {
-            Ok(self.commits.clone())
+        fn fetch_pr_info(&self, _owner: &str, _repo: &str, _pr: u64) -> Result<PrInfo> {
+            Ok(self.info.clone())
         }
     }
 }

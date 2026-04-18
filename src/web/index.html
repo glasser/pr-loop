@@ -143,6 +143,18 @@
     margin: 0;
     font-size: 16px;
     font-weight: 600;
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    min-width: 0;
+  }
+  #header h1 .pr-title {
+    font-weight: 400;
+    color: var(--muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
   }
   #header a { color: var(--accent); text-decoration: none; }
   #header a:hover { text-decoration: underline; }
@@ -743,7 +755,12 @@ function App() {
     <div class=${connectionLost ? 'banner-visible' : ''}>
       <${CcStrip} status=${data.cc_status} />
       <div id="header">
-        <h1>${data.pr.owner}/${data.pr.repo} #${data.pr.pr_number}</h1>
+        <h1>
+          ${data.pr.url
+            ? html`<a href=${data.pr.url} target="_blank">${data.pr.owner}/${data.pr.repo} #${data.pr.pr_number}</a>`
+            : html`${data.pr.owner}/${data.pr.repo} #${data.pr.pr_number}`}
+          ${data.pr.title && html`<span class="pr-title">${data.pr.title}</span>`}
+        </h1>
         <div class="meta">${metaBits.join(' · ')}</div>
       </div>
       <div id="layout">

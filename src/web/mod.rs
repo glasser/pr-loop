@@ -28,6 +28,8 @@ struct PrDto {
     owner: String,
     repo: String,
     pr_number: u64,
+    title: Option<String>,
+    url: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -163,6 +165,8 @@ pub fn run(pr_context: &PrContext, port: Option<u16>, no_open: bool) -> Result<(
                 owner: pr_context.owner.clone(),
                 repo: pr_context.repo.clone(),
                 pr_number: pr_context.pr_number,
+                title: None,
+                url: None,
             }),
             ..Default::default()
         }),
@@ -363,16 +367,20 @@ fn fetch_now(
 ) {
     let threads_result =
         threads_client.fetch_threads(&pr_context.owner, &pr_context.repo, pr_context.pr_number);
-    let commits_result =
-        commits_client.fetch_commits(&pr_context.owner, &pr_context.repo, pr_context.pr_number);
+    let pr_info_result =
+        commits_client.fetch_pr_info(&pr_context.owner, &pr_context.repo, pr_context.pr_number);
 
     let mut state = shared.state.lock().unwrap();
 
-    match (threads_result, commits_result) {
-        (Ok(threads), Ok(commits)) => {
+    match (threads_result, pr_info_result) {
+        (Ok(threads), Ok(pr_info)) => {
             state.threads = threads.iter().map(ThreadDto::from).collect();
             // GitHub returns commits oldest-first; UI shows newest on top.
-            state.commits = commits.iter().rev().map(CommitDto::from).collect();
+            state.commits = pr_info.commits.iter().rev().map(CommitDto::from).collect();
+            if let Some(pr) = state.pr.as_mut() {
+                pr.title = Some(pr_info.title).filter(|s| !s.is_empty());
+                pr.url = Some(pr_info.url).filter(|s| !s.is_empty());
+            }
             state.last_error = None;
         }
         (Err(e), _) | (_, Err(e)) => {
