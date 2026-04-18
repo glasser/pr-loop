@@ -282,6 +282,15 @@
   .diff-add { background: rgba(35, 134, 54, 0.15); }
   .diff-del { background: rgba(248, 81, 73, 0.15); }
   .diff-hunk-header { color: var(--muted); }
+  /* Mark the line actually being commented on (last non-header line in the
+     hunk per GitHub's convention). Uses a left-border indicator + bold so
+     it's still obvious without color. */
+  .diff-target {
+    display: inline-block;
+    width: 100%;
+    box-shadow: inset 3px 0 0 var(--accent);
+    font-weight: 600;
+  }
   .comment {
     padding: 8px 10px;
     margin-bottom: 12px;
@@ -462,10 +471,19 @@ function elapsed(iso) {
 
 function renderDiffHtml(hunk) {
   const lines = hunk.split('\n');
-  return '<pre>' + lines.map(l => {
-    const cls = l.startsWith('+') && !l.startsWith('+++') ? 'diff-add'
+  // Find the last non-empty, non-hunk-header line — that's the commented line
+  // per GitHub's convention.
+  let targetIdx = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const l = lines[i];
+    if (l.trim() !== '' && !l.startsWith('@@')) { targetIdx = i; break; }
+  }
+  return '<pre>' + lines.map((l, i) => {
+    const type = l.startsWith('+') && !l.startsWith('+++') ? 'diff-add'
       : l.startsWith('-') && !l.startsWith('---') ? 'diff-del'
       : l.startsWith('@@') ? 'diff-hunk-header' : '';
+    const target = i === targetIdx ? ' diff-target' : '';
+    const cls = (type + target).trim();
     return cls ? `<span class="${cls}">${escapeHtml(l)}</span>` : escapeHtml(l);
   }).join('\n') + '</pre>';
 }
