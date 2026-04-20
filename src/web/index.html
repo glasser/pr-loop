@@ -718,6 +718,15 @@ function App() {
     return () => clearInterval(id);
   }, []);
 
+  // Keep the browser tab title in sync with the PR.
+  useEffect(() => {
+    if (!data || !data.pr) return;
+    const pr = data.pr;
+    document.title = pr.title
+      ? `${pr.title} #${pr.pr_number}`
+      : `${pr.owner}/${pr.repo} #${pr.pr_number}`;
+  }, [data && data.pr && data.pr.title, data && data.pr && data.pr.pr_number]);
+
   // Track freshly-arrived commits. Wait for the server's first successful
   // GitHub fetch (last_fetched_at populated) before baselining — otherwise
   // the first poll may see an empty commits list and then flag everything
