@@ -3,6 +3,7 @@
 
 use crate::cc_status::{read_cc_status, CcStatus};
 use crate::commits::{CommitsClient, PrCommit, RealCommitsClient};
+use crate::threads::CLAUDE_MARKER;
 use crate::git::{GitClient, RealGitClient};
 use crate::github::PrContext;
 use crate::reply::{RealReplyClient, ReplyClient};
@@ -126,6 +127,7 @@ struct StateResponse<'a> {
 
 struct Shared {
     state: Mutex<State>,
+    peers: Mutex<Vec<PeerSummary>>,
     // Condvar-paired flag so handlers can poke the poller.
     trigger: (Mutex<bool>, Condvar),
 }
@@ -170,13 +172,18 @@ pub fn run(pr_context: &PrContext, port: Option<u16>, no_open: bool) -> Result<(
             }),
             ..Default::default()
         }),
+        peers: Mutex::new(vec![]),
         trigger: (Mutex::new(false), Condvar::new()),
     });
 
-    // Poller thread
+    // Poller thread for our own PR state
     let pr_clone = pr_context.clone();
     let shared_poll = Arc::clone(&shared);
     thread::spawn(move || poll_loop(pr_clone, shared_poll));
+
+    // Poller thread for peer pr-loop web instances
+    let shared_peers = Arc::clone(&shared);
+    thread::spawn(move || peers_poll_loop(bound_port, shared_peers));
 
     eprintln!("pr-loop web: serving at {}", url);
     eprintln!("PR: {}/{}#{}", pr_context.owner, pr_context.repo, pr_context.pr_number);
@@ -231,6 +238,11 @@ fn handle_request(
         (&Method::Post, "/api/poke") => {
             shared.poke();
             build_response("{}".to_string(), "application/json", 200)
+        }
+        (&Method::Get, "/api/peers") => {
+            let peers = shared.peers.lock().unwrap().clone();
+            let body = serde_json::to_string(&peers)?;
+            build_response(body, "application/json", 200)
         }
         (&Method::Post, p) if p.starts_with("/api/threads/") && p.ends_with("/resolve") => {
             let thread_id =
@@ -322,6 +334,17 @@ fn decode_thread_id(raw: &str) -> String {
     urlencoding::decode(raw)
         .map(|s| s.into_owned())
         .unwrap_or_else(|_| raw.to_string())
+}
+
+/// Background loop that refreshes the list of other pr-loop web instances
+/// by reading their port files and calling their /api/state. Runs at a more
+/// relaxed cadence than the main GH poller.
+fn peers_poll_loop(own_port: u16, shared: Arc<Shared>) {
+    loop {
+        let peers = fetch_all_peers(own_port);
+        *shared.peers.lock().unwrap() = peers;
+        thread::sleep(Duration::from_secs(5));
+    }
 }
 
 fn poll_loop(pr_context: PrContext, shared: Arc<Shared>) {
@@ -476,6 +499,153 @@ fn read_port_for_pr(pr_context: &PrContext) -> Option<u16> {
     let path = port_file_path(pr_context).ok()?;
     let s = std::fs::read_to_string(&path).ok()?;
     s.trim().parse().ok()
+}
+
+#[derive(Clone, Serialize, Default)]
+pub struct PeerSummary {
+    port: u16,
+    url: String,
+    pr_owner: String,
+    pr_repo: String,
+    pr_number: u64,
+    pr_title: Option<String>,
+    pr_url: Option<String>,
+    unresolved_threads: u32,
+    needs_response: u32,
+    last_commit_at: Option<String>,
+    last_comment_at: Option<String>,
+    /// Present if the peer couldn't be reached or parsed.
+    unreachable: bool,
+}
+
+/// Enumerate all pr-loop web port files in the cache dir, skipping our own.
+/// Returns (port, port_file_path) pairs so callers can delete stale files.
+fn discover_peer_ports(own_port: u16) -> Vec<(u16, PathBuf)> {
+    let Ok(base) = dirs_cache() else { return vec![] };
+    let dir = base.join("pr-loop");
+    let Ok(entries) = std::fs::read_dir(&dir) else { return vec![] };
+    entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with("web-"))
+        .filter_map(|e| {
+            let path = e.path();
+            let port: u16 = std::fs::read_to_string(&path).ok()?.trim().parse().ok()?;
+            if port == own_port {
+                None
+            } else {
+                Some((port, path))
+            }
+        })
+        .collect()
+}
+
+/// Call `/api/state` on another pr-loop web instance and summarize what it's
+/// tracking. Returns a PeerSummary with `unreachable: true` on failure so the
+/// UI can show something actionable (a stale port file from a crashed server
+/// looks the same).
+fn fetch_peer_summary(port: u16) -> PeerSummary {
+    let url = format!("http://127.0.0.1:{}", port);
+    let mut summary = PeerSummary {
+        port,
+        url: format!("{}/", url),
+        unreachable: true,
+        ..Default::default()
+    };
+
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(800))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return summary,
+    };
+
+    let resp = match client.get(format!("{}/api/state", url)).send() {
+        Ok(r) => r,
+        Err(_) => return summary,
+    };
+    if !resp.status().is_success() {
+        return summary;
+    }
+    let value: serde_json::Value = match resp.json() {
+        Ok(v) => v,
+        Err(_) => return summary,
+    };
+
+    summary.unreachable = false;
+
+    if let Some(pr) = value.get("pr") {
+        summary.pr_owner = pr.get("owner").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        summary.pr_repo = pr.get("repo").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        summary.pr_number = pr.get("pr_number").and_then(|v| v.as_u64()).unwrap_or(0);
+        summary.pr_title = pr.get("title").and_then(|v| v.as_str()).map(str::to_string);
+        summary.pr_url = pr.get("url").and_then(|v| v.as_str()).map(str::to_string);
+    }
+
+    // Count unresolved non-paperclip threads, and of those how many need a
+    // response (last comment not from Claude). Track newest comment timestamp.
+    let mut latest_comment: Option<String> = None;
+    if let Some(threads) = value.get("threads").and_then(|t| t.as_array()) {
+        for t in threads {
+            let is_resolved = t.get("is_resolved").and_then(|v| v.as_bool()).unwrap_or(false);
+            let is_paperclip = t.get("is_paperclip").and_then(|v| v.as_bool()).unwrap_or(false);
+            if is_resolved || is_paperclip {
+                continue;
+            }
+            summary.unresolved_threads += 1;
+            let comments = t.get("comments").and_then(|c| c.as_array());
+            let Some(cs) = comments else { continue };
+            if let Some(last) = cs.last() {
+                let body = last.get("body").and_then(|v| v.as_str()).unwrap_or("");
+                if !body.starts_with(CLAUDE_MARKER) {
+                    summary.needs_response += 1;
+                }
+            }
+            for c in cs {
+                let Some(created) = c.get("created_at").and_then(|v| v.as_str()) else { continue };
+                match &latest_comment {
+                    None => latest_comment = Some(created.to_string()),
+                    Some(cur) if cur.as_str() < created => latest_comment = Some(created.to_string()),
+                    _ => {}
+                }
+            }
+        }
+    }
+    summary.last_comment_at = latest_comment;
+
+    if let Some(commits) = value.get("commits").and_then(|c| c.as_array()) {
+        // commits are sent newest-first by the peer.
+        if let Some(first) = commits.first() {
+            summary.last_commit_at = first
+                .get("committed_date")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+        }
+    }
+
+    summary
+}
+
+fn fetch_all_peers(own_port: u16) -> Vec<PeerSummary> {
+    let mut peers: Vec<PeerSummary> = Vec::new();
+    for (port, port_file) in discover_peer_ports(own_port) {
+        let summary = fetch_peer_summary(port);
+        if summary.unreachable {
+            // A port file pointing to a dead server is junk — probably
+            // left behind by a SIGKILL'd instance. Clean it up so the
+            // next discovery is quieter.
+            let _ = std::fs::remove_file(&port_file);
+            continue;
+        }
+        peers.push(summary);
+    }
+    peers.sort_by(|a, b| {
+        a.pr_owner
+            .cmp(&b.pr_owner)
+            .then_with(|| a.pr_repo.cmp(&b.pr_repo))
+            .then_with(|| a.pr_number.cmp(&b.pr_number))
+    });
+    peers
 }
 
 /// If a `pr-loop web` server is running for this PR, send it a poke so it

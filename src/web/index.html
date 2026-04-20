@@ -403,6 +403,82 @@
     padding: 48px 16px;
   }
   .empty .big { font-size: 32px; margin-bottom: 8px; }
+  #peers {
+    position: fixed;
+    right: 16px;
+    bottom: 16px;
+    max-width: 320px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    z-index: 40;
+  }
+  #peers .header {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+    padding: 0 4px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  #peers .header button {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    line-height: 1.4;
+  }
+  .peer {
+    display: block;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 12px;
+    color: var(--fg);
+    text-decoration: none;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+  }
+  .peer:hover {
+    border-color: var(--accent);
+  }
+  .peer.unreachable {
+    opacity: 0.5;
+    font-style: italic;
+  }
+  .peer .pr-line {
+    font-weight: 600;
+    display: flex;
+    gap: 6px;
+    align-items: baseline;
+  }
+  .peer .pr-line .num {
+    color: var(--muted);
+    font-weight: 400;
+    font-size: 11px;
+  }
+  .peer .pr-line .title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    flex: 1;
+  }
+  .peer .counts {
+    margin-top: 2px;
+    color: var(--muted);
+    font-size: 11px;
+  }
+  .peer .counts .attn {
+    color: var(--danger-fg);
+    font-weight: 600;
+  }
+  .peer .times {
+    margin-top: 2px;
+    color: var(--muted);
+    font-size: 11px;
+  }
 </style>
 </head>
 <body>
@@ -691,6 +767,56 @@ function Commit({ commit, isNew, onDismiss }) {
   `;
 }
 
+function PeersWidget() {
+  const [peers, setPeers] = useState([]);
+  const [collapsed, setCollapsed] = useState(false);
+  useTick(10000);
+
+  useEffect(() => {
+    async function poll() {
+      try {
+        const r = await fetch('/api/peers');
+        if (!r.ok) return;
+        setPeers(await r.json());
+      } catch (_) {}
+    }
+    poll();
+    const id = setInterval(poll, 5000);
+    return () => clearInterval(id);
+  }, []);
+
+  if (!peers || peers.length === 0) return null;
+
+  return html`
+    <div id="peers">
+      <div class="header">
+        <span>${peers.length} other pr-loop${peers.length === 1 ? '' : 's'}</span>
+        <button onClick=${() => setCollapsed(c => !c)}>
+          ${collapsed ? 'show' : 'hide'}
+        </button>
+      </div>
+      ${!collapsed && peers.map(p => html`
+        <a class="peer" href=${p.url} target="_blank" key=${p.port}>
+          <div class="pr-line">
+            <span class="num">${p.pr_owner}/${p.pr_repo} #${p.pr_number}</span>
+            <span class="title">${p.pr_title || ''}</span>
+          </div>
+          <div class="counts">
+            ${p.needs_response > 0
+              ? html`<span class="attn">${p.needs_response} need${p.needs_response === 1 ? 's' : ''} reply</span>`
+              : html`<span>no unaddressed comments</span>`}
+            ${p.unresolved_threads > 0 ? html` · ${p.unresolved_threads} unresolved` : ''}
+          </div>
+          <div class="times">
+            ${p.last_commit_at ? html`commit ${relativeTime(p.last_commit_at)}` : 'no commits'}
+            ${p.last_comment_at ? html` · comment ${relativeTime(p.last_comment_at)}` : ''}
+          </div>
+        </a>
+      `)}
+    </div>
+  `;
+}
+
 function App() {
   const [data, setData] = useState(null);
   const [failures, setFailures] = useState(0);
@@ -806,6 +932,7 @@ function App() {
           </div>
         </div>
       </div>
+      <${PeersWidget} />
     </div>
   `;
 }
