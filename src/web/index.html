@@ -798,7 +798,7 @@ function PeersWidget() {
         </button>
       </div>
       ${!collapsed && peers.map(p => html`
-        <a class="peer" href=${p.url} target="_blank" key=${p.port}>
+        <a class="peer" href=${p.url} key=${p.port}>
           <div class="pr-line">
             <span class="num">${p.pr_owner}/${p.pr_repo} #${p.pr_number}</span>
             <span class="title">${p.pr_title || ''}</span>
