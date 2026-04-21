@@ -64,10 +64,13 @@
   }
   #connection-banner.visible { display: block; }
   .banner-visible > #header { margin-top: 36px; }
-  #cc-strip {
+  .top-bar {
     position: sticky;
     top: 0;
     z-index: 50;
+    background: var(--bg);
+  }
+  #cc-strip {
     padding: 6px 16px;
     background: var(--thread-bg);
     border-bottom: 1px solid var(--border);
@@ -230,7 +233,6 @@
     border-radius: 6px;
     margin-bottom: 16px;
     background: var(--bg);
-    overflow: hidden;
   }
   .thread.outdated {
     border-left: 3px solid var(--outdated);
@@ -239,10 +241,15 @@
     background: var(--thread-bg);
     padding: 8px 12px;
     border-bottom: 1px solid var(--border);
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
     display: flex;
     align-items: center;
     gap: 8px;
     font-size: 13px;
+    position: sticky;
+    top: var(--top-bar-height, 80px);
+    z-index: 10;
   }
   .thread-header .location {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -488,7 +495,7 @@
 
 <script type="module">
 import { h, render } from 'https://esm.sh/preact@10.22.0';
-import { useState, useEffect, useRef } from 'https://esm.sh/preact@10.22.0/hooks';
+import { useState, useEffect, useLayoutEffect, useRef } from 'https://esm.sh/preact@10.22.0/hooks';
 import htm from 'https://esm.sh/htm@3.1.1';
 import MarkdownIt from 'https://esm.sh/markdown-it@14.1.0';
 import { full as markdownItEmoji } from 'https://esm.sh/markdown-it-emoji@3.0.0';
@@ -828,6 +835,17 @@ function App() {
   // Tick every 10s so relative times stay fresh even without a data change.
   useTick(10000);
 
+  // Measure the sticky top-bar's actual height into a CSS variable so
+  // sticky thread headers can stack correctly below it. Runs after every
+  // render so it stays accurate as the CC strip's content changes size.
+  const topBarRef = useRef(null);
+  useLayoutEffect(() => {
+    const el = topBarRef.current;
+    if (!el) return;
+    const h = el.getBoundingClientRect().height;
+    document.documentElement.style.setProperty('--top-bar-height', `${h}px`);
+  });
+
   async function poll() {
     try {
       const res = await fetch('/api/state');
@@ -904,15 +922,17 @@ function App() {
       ⚠ Lost connection to pr-loop server. Is it still running?
     </div>
     <div class=${connectionLost ? 'banner-visible' : ''}>
-      <${CcStrip} status=${data.cc_status} />
-      <div id="header">
-        <h1>
-          ${data.pr.url
-            ? html`<a href=${data.pr.url} target="_blank">${data.pr.owner}/${data.pr.repo} #${data.pr.pr_number}</a>`
-            : html`${data.pr.owner}/${data.pr.repo} #${data.pr.pr_number}`}
-          ${data.pr.title && html`<span class="pr-title">${data.pr.title}</span>`}
-        </h1>
-        <div class="meta">${metaBits.join(' · ')}</div>
+      <div class="top-bar" ref=${topBarRef}>
+        <${CcStrip} status=${data.cc_status} />
+        <div id="header">
+          <h1>
+            ${data.pr.url
+              ? html`<a href=${data.pr.url} target="_blank">${data.pr.owner}/${data.pr.repo} #${data.pr.pr_number}</a>`
+              : html`${data.pr.owner}/${data.pr.repo} #${data.pr.pr_number}`}
+            ${data.pr.title && html`<span class="pr-title">${data.pr.title}</span>`}
+          </h1>
+          <div class="meta">${metaBits.join(' · ')}</div>
+        </div>
       </div>
       <div id="layout">
         <div id="threads">
