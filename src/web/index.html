@@ -179,9 +179,9 @@
   #threads { min-width: 0; }
   #commits-panel {
     position: sticky;
-    top: 16px;
+    top: calc(var(--top-bar-height, 80px) + 8px);
     align-self: start;
-    max-height: calc(100vh - 32px);
+    max-height: calc(100vh - var(--top-bar-height, 80px) - 24px);
     overflow-y: auto;
     border: 1px solid var(--border);
     border-radius: 6px;
