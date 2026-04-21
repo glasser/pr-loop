@@ -273,6 +273,7 @@
     gap: 0;
   }
   .thread-body.no-diff { grid-template-columns: 1fr; }
+  .thread-left { min-width: 0; display: flex; flex-direction: column; }
   .thread-comments { padding: 12px; min-width: 0; }
   .thread-diff {
     border-left: 1px solid var(--border);
@@ -280,6 +281,7 @@
     background: var(--thread-bg);
     overflow-x: auto;
     min-width: 0;
+    border-bottom-right-radius: 6px;
   }
   .thread-diff pre {
     margin: 0;
@@ -382,7 +384,9 @@
     padding: 12px;
     border-top: 1px solid var(--border-muted);
     background: var(--thread-bg);
+    border-bottom-left-radius: 6px;
   }
+  .thread-body.no-diff .reply-box { border-bottom-right-radius: 6px; }
   .reply-box textarea {
     width: 100%;
     min-height: 60px;
@@ -660,26 +664,28 @@ function Thread({ thread, onPoke }) {
         </div>
       </div>
       <div class="thread-body ${diffHunk ? '' : 'no-diff'}">
-        <div class="thread-comments">
-          ${thread.comments.map(c => html`<${Comment} c=${c} key=${c.id} />`)}
+        <div class="thread-left">
+          <div class="thread-comments">
+            ${thread.comments.map(c => html`<${Comment} c=${c} key=${c.id} />`)}
+          </div>
+          <div class="reply-box">
+            <textarea
+              placeholder="Reply as yourself…"
+              value=${reply}
+              onInput=${(e) => setReply(e.target.value)}
+              onKeyDown=${(e) => {
+                if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') doReply();
+              }}
+            ></textarea>
+            <div class="actions">
+              <button class=${'primary' + (posting ? ' spin' : '')} onClick=${doReply} disabled=${posting || !reply.trim()}>
+                ${posting ? 'Posting…' : 'Reply'}
+              </button>
+              <span class="hint">Cmd/Ctrl+Enter</span>
+            </div>
+          </div>
         </div>
         ${diffHunk && html`<div class="thread-diff"><${DiffHunk} hunk=${diffHunk} /></div>`}
-      </div>
-      <div class="reply-box">
-        <textarea
-          placeholder="Reply as yourself…"
-          value=${reply}
-          onInput=${(e) => setReply(e.target.value)}
-          onKeyDown=${(e) => {
-            if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') doReply();
-          }}
-        ></textarea>
-        <div class="actions">
-          <button class=${'primary' + (posting ? ' spin' : '')} onClick=${doReply} disabled=${posting || !reply.trim()}>
-            ${posting ? 'Posting…' : 'Reply'}
-          </button>
-          <span class="hint">Cmd/Ctrl+Enter</span>
-        </div>
       </div>
     </div>
   `;
