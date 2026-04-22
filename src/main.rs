@@ -8,6 +8,7 @@ mod circleci;
 mod cli;
 mod commits;
 mod credentials;
+mod gh_actions;
 mod git;
 mod github;
 #[cfg(test)]
@@ -297,12 +298,10 @@ fn main() {
             // Analyze and output recommendation
             let action = analyze_pr(&checks_summary, threads);
 
-            // If there are CI failures and we have a CircleCI token, fetch logs
-            let circleci_info = if creds.circleci_token.is_some() {
-                fetch_circleci_failure_info(&creds, &checks_summary)
-            } else {
-                CircleCiFailureInfo::default()
-            };
+            // If there are CI failures, fetch logs. fetch_ci_failure_info
+            // handles the no-CircleCI-token case internally; GitHub Actions
+            // logs don't need extra credentials.
+            let circleci_info = fetch_ci_failure_info(&creds, &checks_summary);
 
             let mergeable_status = match mergeable_client.fetch_mergeable_status(
                 &pr_context.owner,
@@ -327,32 +326,41 @@ fn main() {
     }
 }
 
-/// Fetch CircleCI failure info (logs + test failures) for failed checks.
-fn fetch_circleci_failure_info(creds: &Credentials, checks: &ChecksSummary) -> CircleCiFailureInfo {
-    let token = match &creds.circleci_token {
-        Some(t) => t,
-        None => return CircleCiFailureInfo::default(),
-    };
-
-    let client = RealCircleCiClient::new(token.clone());
+/// Fetch CI failure info (logs + test failures) for failed checks. Handles
+/// both CircleCI (via their API; requires CIRCLECI_TOKEN) and GitHub Actions
+/// (via `gh api`, no extra credentials needed).
+fn fetch_ci_failure_info(creds: &Credentials, checks: &ChecksSummary) -> CircleCiFailureInfo {
+    let circleci_client = creds
+        .circleci_token
+        .as_ref()
+        .map(|t| RealCircleCiClient::new(t.clone()));
+    let gh_actions_client = gh_actions::RealGhActionsClient;
     let mut combined = CircleCiFailureInfo::default();
 
     for check in checks.failed() {
-        if let Some(url) = &check.url {
-            if is_circleci_url(url) {
-                if let Some(job_info) = parse_circleci_url(url) {
-                    match get_job_failures(&client, &job_info) {
-                        Ok(info) => {
-                            combined.step_logs.extend(info.step_logs);
-                            combined.test_failures.extend(info.test_failures);
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "Warning: Failed to fetch CircleCI logs for {}: {}",
-                                check.name, e
-                            );
-                        }
+        let Some(url) = &check.url else { continue };
+        if is_circleci_url(url) {
+            let Some(c) = &circleci_client else { continue };
+            if let Some(job_info) = parse_circleci_url(url) {
+                match get_job_failures(c, &job_info) {
+                    Ok(info) => {
+                        combined.step_logs.extend(info.step_logs);
+                        combined.test_failures.extend(info.test_failures);
                     }
+                    Err(e) => eprintln!(
+                        "Warning: Failed to fetch CircleCI logs for {}: {}",
+                        check.name, e
+                    ),
+                }
+            }
+        } else if gh_actions::is_gh_actions_url(url) {
+            if let Some(job_info) = gh_actions::parse_gh_actions_url(url) {
+                match gh_actions::get_failed_step_logs(&gh_actions_client, &job_info) {
+                    Ok(logs) => combined.step_logs.extend(logs),
+                    Err(e) => eprintln!(
+                        "Warning: Failed to fetch GitHub Actions logs for {}: {}",
+                        check.name, e
+                    ),
                 }
             }
         }
@@ -902,19 +910,13 @@ fn run_checks_command(
         println!();
     }
 
-    // Fetch and display CircleCI failure info
+    // Fetch and display CI failure info (CircleCI + GH Actions)
     if !failed.is_empty() {
-        let circleci_info = if creds.circleci_token.is_some() {
-            fetch_circleci_failure_info(creds, &checks_summary)
-        } else {
-            CircleCiFailureInfo::default()
-        };
-
+        let circleci_info = fetch_ci_failure_info(creds, &checks_summary);
         if !circleci_info.test_failures.is_empty() {
             println!("## CI Test Failures");
             print_test_failures(&circleci_info.test_failures);
         }
-
         if !circleci_info.step_logs.is_empty() {
             println!("## CI Failure Logs");
             print_step_logs(&circleci_info.step_logs);
