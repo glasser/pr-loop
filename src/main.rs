@@ -599,7 +599,11 @@ fn print_step_logs(logs: &[FailedStepLog]) {
             println!();
             println!("**Stdout (last lines):**");
             println!("```");
-            let output_truncated = truncate_log_tail(&log.output, 2000);
+            // Gradle/Java failures often end with ~15 lines of "Try: Run
+            // with --stacktrace / BUILD FAILED / Publishing Build Scan"
+            // boilerplate, so keep a decently sized tail so the actual
+            // error is visible above it.
+            let output_truncated = truncate_log_tail(&log.output, 4000);
             println!("{}", output_truncated);
             println!("```");
         }
