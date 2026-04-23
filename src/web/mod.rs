@@ -234,6 +234,15 @@ pub fn run(
     let shared_peers = Arc::clone(&shared);
     thread::spawn(move || peers_poll_loop(bound_port, shared_peers));
 
+    // Periodically re-write our own port file so if anything deletes it
+    // (the hub's stale-file cleanup after a transient unreachable, etc.)
+    // we re-register within a few seconds.
+    let pr_for_port = pr_context.clone();
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_secs(5));
+        let _ = write_port_file(&pr_for_port, bound_port);
+    });
+
     // Spin up one HTTP server per bind address, all dispatching to the same
     // handler through the shared Arc.
     let mut handles = Vec::new();
@@ -713,9 +722,10 @@ pub fn fetch_all_peers(own_port: u16) -> Vec<PeerSummary> {
     for (port, port_file) in discover_peer_ports(own_port) {
         let summary = fetch_peer_summary(port);
         if summary.unreachable {
-            // A port file pointing to a dead server is junk — probably
-            // left behind by a SIGKILL'd instance. Clean it up so the
-            // next discovery is quieter.
+            // Stale port file (e.g., SIGKILL'd web). Delete it so the
+            // next poll is quieter. Running webs re-write their own
+            // port file every few seconds, so this is safe: a transient
+            // failure gets healed on the next rewrite.
             let _ = std::fs::remove_file(&port_file);
             continue;
         }
