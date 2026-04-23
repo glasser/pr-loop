@@ -2,6 +2,7 @@
 // commits in a browser with live updates.
 
 use crate::cc_status::{read_cc_status, CcStatus};
+use crate::checks::{Check, CheckStatus, ChecksClient, RealChecksClient};
 use crate::commits::{CommitsClient, PrCommit, RealCommitsClient};
 use crate::threads::CLAUDE_MARKER;
 use crate::git::{GitClient, RealGitClient};
@@ -106,11 +107,37 @@ impl From<&PrCommit> for CommitDto {
     }
 }
 
+#[derive(Clone, Serialize)]
+struct CheckDto {
+    name: String,
+    /// One of: "pass", "fail", "pending", "skipping", "cancelled".
+    status: &'static str,
+    url: Option<String>,
+}
+
+impl From<&Check> for CheckDto {
+    fn from(c: &Check) -> Self {
+        let status = match c.status {
+            CheckStatus::Pass => "pass",
+            CheckStatus::Fail => "fail",
+            CheckStatus::Pending => "pending",
+            CheckStatus::Skipping => "skipping",
+            CheckStatus::Cancelled => "cancelled",
+        };
+        Self {
+            name: c.name.clone(),
+            status,
+            url: c.url.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Default)]
 struct State {
     pr: Option<PrDto>,
     threads: Vec<ThreadDto>,
     commits: Vec<CommitDto>,
+    checks: Vec<CheckDto>,
     last_fetched_at: Option<String>,
     last_error: Option<String>,
 }
@@ -426,6 +453,11 @@ fn fetch_now(
         threads_client.fetch_threads(&pr_context.owner, &pr_context.repo, pr_context.pr_number);
     let pr_info_result =
         commits_client.fetch_pr_info(&pr_context.owner, &pr_context.repo, pr_context.pr_number);
+    // Checks failures shouldn't block threads/commits from rendering, so
+    // fetch independently and keep whatever works.
+    let checks_client = RealChecksClient;
+    let checks_result =
+        checks_client.fetch_checks(&pr_context.owner, &pr_context.repo, pr_context.pr_number);
 
     let mut state = shared.state.lock().unwrap();
 
@@ -443,6 +475,9 @@ fn fetch_now(
         (Err(e), _) | (_, Err(e)) => {
             state.last_error = Some(e.to_string());
         }
+    }
+    if let Ok(checks) = checks_result {
+        state.checks = checks.iter().map(CheckDto::from).collect();
     }
     state.last_fetched_at = Some(iso_now());
 }

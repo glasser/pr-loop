@@ -168,6 +168,58 @@
     color: var(--muted);
     font-size: 12px;
   }
+  #ci-strip {
+    padding: 6px 16px;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border-muted);
+    font-size: 12px;
+    color: var(--muted);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+  }
+  #ci-strip .overall { font-weight: 600; }
+  #ci-strip .overall.pass { color: var(--ok-fg); }
+  #ci-strip .overall.fail { color: var(--danger-fg); }
+  #ci-strip .overall.pending { color: var(--muted); }
+  #ci-strip details { display: inline; }
+  #ci-strip summary {
+    cursor: pointer;
+    list-style: none;
+    color: var(--accent);
+  }
+  #ci-strip summary::-webkit-details-marker { display: none; }
+  #ci-strip .check-list {
+    display: block;
+    margin-top: 6px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+  }
+  #ci-strip .check {
+    display: flex;
+    gap: 6px;
+    align-items: baseline;
+    padding: 1px 0;
+  }
+  #ci-strip .check .dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  #ci-strip .check.pass .dot { background: var(--ok-fg); }
+  #ci-strip .check.fail .dot { background: var(--danger-fg); }
+  #ci-strip .check.pending .dot {
+    background: transparent;
+    box-shadow: inset 0 0 0 1px var(--muted);
+  }
+  #ci-strip .check.skipping .dot, #ci-strip .check.cancelled .dot {
+    background: var(--border);
+  }
+  #ci-strip .check a { color: inherit; text-decoration: none; }
+  #ci-strip .check a:hover { text-decoration: underline; }
   #layout {
     display: grid;
     grid-template-columns: 1fr 320px;
@@ -702,6 +754,53 @@ function Thread({ thread, onPoke }) {
   `;
 }
 
+function CiStrip({ checks }) {
+  if (!checks || checks.length === 0) return null;
+  const counts = { pass: 0, fail: 0, pending: 0, skipping: 0, cancelled: 0 };
+  for (const c of checks) counts[c.status] = (counts[c.status] || 0) + 1;
+  const overallClass =
+    counts.fail > 0 ? 'fail' :
+    counts.pending > 0 ? 'pending' : 'pass';
+  const overallLabel =
+    counts.fail > 0 ? `${counts.fail} failed` :
+    counts.pending > 0 ? `${counts.pending} pending` :
+    'all passing';
+
+  const summaryBits = [];
+  if (counts.pass > 0) summaryBits.push(`✓ ${counts.pass} passed`);
+  if (counts.fail > 0) summaryBits.push(`✗ ${counts.fail} failed`);
+  if (counts.pending > 0) summaryBits.push(`○ ${counts.pending} pending`);
+  if (counts.skipping > 0) summaryBits.push(`⊘ ${counts.skipping} skipped`);
+  if (counts.cancelled > 0) summaryBits.push(`⊘ ${counts.cancelled} cancelled`);
+
+  // Order checks: failed first, then pending, then the rest alphabetically.
+  const order = { fail: 0, pending: 1, pass: 2, cancelled: 3, skipping: 4 };
+  const sorted = [...checks].sort((a, b) =>
+    (order[a.status] ?? 9) - (order[b.status] ?? 9) || a.name.localeCompare(b.name)
+  );
+
+  return html`
+    <div id="ci-strip">
+      <span>CI:</span>
+      <span class=${'overall ' + overallClass}>${overallLabel}</span>
+      <span>· ${summaryBits.join(' · ')}</span>
+      <details>
+        <summary>details</summary>
+        <div class="check-list">
+          ${sorted.map(c => html`
+            <div class=${'check ' + c.status} key=${c.name}>
+              <span class="dot"></span>
+              ${c.url
+                ? html`<a href=${c.url} target="_blank">${c.name}</a>`
+                : html`<span>${c.name}</span>`}
+            </div>
+          `)}
+        </div>
+      </details>
+    </div>
+  `;
+}
+
 function CcStrip({ status }) {
   if (!status) {
     return html`
@@ -950,6 +1049,7 @@ function App() {
           </h1>
           <div class="meta">${metaBits.join(' · ')}</div>
         </div>
+        <${CiStrip} checks=${data.checks} />
       </div>
       <div id="layout">
         <div id="threads">
