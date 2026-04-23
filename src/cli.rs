@@ -111,6 +111,25 @@ pub enum Command {
         #[arg(long)]
         no_open: bool,
     },
+
+    /// Run a tiny fixed-port redirector that points at whichever `pr-loop web`
+    /// instances you have running. Intended to run at login so you can keep
+    /// a single bookmark like http://127.0.0.1:9876/ that always "just works".
+    Hub {
+        /// TCP port to bind on (default: 9876).
+        #[arg(long, default_value = "9876")]
+        port: u16,
+
+        /// Write a LaunchAgent plist to ~/Library/LaunchAgents and print the
+        /// `launchctl load` command. Does NOT load it automatically.
+        #[arg(long, conflicts_with = "uninstall")]
+        install: bool,
+
+        /// Print the `launchctl unload` command for the installed LaunchAgent
+        /// plist and then delete the plist file. Does NOT unload it.
+        #[arg(long, conflicts_with = "install")]
+        uninstall: bool,
+    },
 }
 
 #[cfg(test)]

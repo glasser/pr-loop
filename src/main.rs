@@ -11,6 +11,7 @@ mod credentials;
 mod gh_actions;
 mod git;
 mod github;
+mod hub;
 #[cfg(test)]
 mod graphql_validation;
 mod pr;
@@ -43,6 +44,23 @@ use wait::{capture_snapshot, wait_until_actionable, wait_until_actionable_or_hap
 
 fn main() {
     let cli = Cli::parse();
+
+    // Hub subcommand doesn't need PR context, credentials, or anything else;
+    // handle it (and --install/--uninstall) before the rest of setup.
+    if let Some(Command::Hub { port, install, uninstall }) = &cli.command {
+        let result = if *install {
+            hub::install()
+        } else if *uninstall {
+            hub::uninstall()
+        } else {
+            hub::run(*port)
+        };
+        if let Err(e) = result {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
 
     // Get credentials
     let provider = RealCredentialProvider;
@@ -193,6 +211,11 @@ fn main() {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
+        }
+
+        Some(Command::Hub { .. }) => {
+            // Handled above before setup; unreachable.
+            unreachable!();
         }
 
         None => {

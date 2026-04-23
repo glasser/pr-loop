@@ -503,19 +503,19 @@ fn read_port_for_pr(pr_context: &PrContext) -> Option<u16> {
 
 #[derive(Clone, Serialize, Default)]
 pub struct PeerSummary {
-    port: u16,
-    url: String,
-    pr_owner: String,
-    pr_repo: String,
-    pr_number: u64,
-    pr_title: Option<String>,
-    pr_url: Option<String>,
-    unresolved_threads: u32,
-    needs_response: u32,
-    last_commit_at: Option<String>,
-    last_comment_at: Option<String>,
+    pub port: u16,
+    pub url: String,
+    pub pr_owner: String,
+    pub pr_repo: String,
+    pub pr_number: u64,
+    pub pr_title: Option<String>,
+    pub pr_url: Option<String>,
+    pub unresolved_threads: u32,
+    pub needs_response: u32,
+    pub last_commit_at: Option<String>,
+    pub last_comment_at: Option<String>,
     /// Present if the peer couldn't be reached or parsed.
-    unreachable: bool,
+    pub unreachable: bool,
 }
 
 /// Enumerate all pr-loop web port files in the cache dir, skipping our own.
@@ -626,7 +626,7 @@ fn fetch_peer_summary(port: u16) -> PeerSummary {
     summary
 }
 
-fn fetch_all_peers(own_port: u16) -> Vec<PeerSummary> {
+pub fn fetch_all_peers(own_port: u16) -> Vec<PeerSummary> {
     let mut peers: Vec<PeerSummary> = Vec::new();
     for (port, port_file) in discover_peer_ports(own_port) {
         let summary = fetch_peer_summary(port);
