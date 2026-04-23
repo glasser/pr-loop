@@ -158,8 +158,8 @@ h1 {{ font-size: 18px; margin-bottom: 16px; }}
     )
 }
 
-/// Print the launchctl command the user can run to load the LaunchAgent,
-/// and write the plist to ~/Library/LaunchAgents. Does NOT load it.
+/// Write the LaunchAgent plist to ~/Library/LaunchAgents. Does NOT load it;
+/// prints the commands to run.
 pub fn install() -> Result<()> {
     let plist_path = plist_path()?;
     let exe = std::env::current_exe().context("current_exe")?;
@@ -178,10 +178,12 @@ pub fn install() -> Result<()> {
     println!("Binary: {}", exe.display());
     println!("Log:    {}", log_path.display());
     println!();
-    println!("To start it now (and at every login):");
-    println!("  launchctl load {}", plist_path.display());
+    println!("The plist is in place, so launchd will start the hub at your");
+    println!("next login. To start it right now without logging out, run:");
     println!();
-    println!("Then open http://127.0.0.1:9876/ — bookmark away.");
+    println!("  launchctl bootstrap gui/$UID {}", plist_path.display());
+    println!();
+    println!("Then open http://127.0.0.1:48817/ and bookmark it.");
     println!();
     println!("Note: the plist pins the binary to its current path. If you");
     println!("move or rebuild somewhere else, rerun `pr-loop hub --install`.");
@@ -194,10 +196,10 @@ pub fn uninstall() -> Result<()> {
         println!("Nothing to uninstall — {} does not exist.", plist_path.display());
         return Ok(());
     }
-    println!("To stop the hub now:");
-    println!("  launchctl unload {}", plist_path.display());
+    println!("To stop the hub right now (for this session):");
+    println!("  launchctl bootout gui/$UID/{}", LAUNCHD_LABEL);
     println!();
-    println!("Then to remove the plist:");
+    println!("To prevent it from starting again at next login, delete the plist:");
     println!("  rm {}", plist_path.display());
     println!();
     println!("(Not running these for you — up to you to confirm.)");
