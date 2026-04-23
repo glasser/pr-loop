@@ -100,16 +100,18 @@ pub enum Command {
     Checks,
 
     /// Launch a local web UI showing unresolved review threads and PR commits.
-    /// Auto-opens a browser tab. Polls GitHub periodically and immediately on
-    /// local git ref changes or replies from the UI / `pr-loop reply`.
+    /// Prints the URL on startup. Polls GitHub periodically and immediately
+    /// on local git ref changes or replies from the UI / `pr-loop reply`.
     Web {
         /// TCP port to bind on (default: random free port).
         #[arg(long)]
         port: Option<u16>,
 
-        /// Don't auto-open a browser window; just print the URL.
+        /// Auto-open the URL in a browser. Off by default — typically you
+        /// access pr-loop web instances through `pr-loop hub` instead of
+        /// a fresh tab for each one.
         #[arg(long)]
-        no_open: bool,
+        open: bool,
 
         /// Address(es) to bind on. Overrides config file's `[web].bind`.
         /// Repeat for multiple: `--bind 127.0.0.1 --bind 100.64.1.2`.
@@ -419,9 +421,9 @@ mod tests {
     fn parse_web_command() {
         let cli = Cli::parse_from(["pr-loop", "web"]);
         match cli.command {
-            Some(Command::Web { port, no_open, bind }) => {
+            Some(Command::Web { port, open, bind }) => {
                 assert!(port.is_none());
-                assert!(!no_open);
+                assert!(!open);
                 assert!(bind.is_empty());
             }
             _ => panic!("Expected Web command"),
@@ -433,14 +435,14 @@ mod tests {
         let cli = Cli::parse_from([
             "pr-loop", "web",
             "--port", "8080",
-            "--no-open",
+            "--open",
             "--bind", "127.0.0.1",
             "--bind", "100.64.1.2",
         ]);
         match cli.command {
-            Some(Command::Web { port, no_open, bind }) => {
+            Some(Command::Web { port, open, bind }) => {
                 assert_eq!(port, Some(8080));
-                assert!(no_open);
+                assert!(open);
                 assert_eq!(bind, vec!["127.0.0.1".to_string(), "100.64.1.2".to_string()]);
             }
             _ => panic!("Expected Web command"),

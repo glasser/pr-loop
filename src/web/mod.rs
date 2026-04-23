@@ -155,7 +155,7 @@ pub fn run(
     pr_context: &PrContext,
     binds: &[String],
     port: Option<u16>,
-    no_open: bool,
+    open_browser: bool,
 ) -> Result<()> {
     // Bind the first address first so we know the port number (kernel-picked
     // when port is None). Subsequent binds reuse that port so all interfaces
@@ -226,7 +226,7 @@ pub fn run(
     }
 
     eprintln!("PR: {}/{}#{}", pr_context.owner, pr_context.repo, pr_context.pr_number);
-    if !no_open {
+    if open_browser {
         if let Err(e) = open::that(&primary_url) {
             eprintln!("Warning: Failed to open browser: {}. Open the URL manually.", e);
         }

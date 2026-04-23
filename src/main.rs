@@ -241,14 +241,14 @@ fn main() {
             );
         }
 
-        Some(Command::Web { port, no_open, bind }) => {
+        Some(Command::Web { port, open, bind }) => {
             let cfg = config::load();
             let resolved_binds = if !bind.is_empty() {
                 bind
             } else {
                 cfg.web_binds()
             };
-            if let Err(e) = web::run(&pr_context, &resolved_binds, port, no_open) {
+            if let Err(e) = web::run(&pr_context, &resolved_binds, port, open) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
