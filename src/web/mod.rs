@@ -126,6 +126,7 @@ struct StateResponse<'a> {
 }
 
 struct Shared {
+    pr_context: PrContext,
     state: Mutex<State>,
     peers: Mutex<Vec<PeerSummary>>,
     // Condvar-paired flag so handlers can poke the poller.
@@ -150,18 +151,39 @@ impl Shared {
     }
 }
 
-pub fn run(pr_context: &PrContext, port: Option<u16>, no_open: bool) -> Result<()> {
-    // Bind first so we know the assigned port before spawning anything.
-    let addr: SocketAddr = ([127, 0, 0, 1], port.unwrap_or(0)).into();
-    let listener = TcpListener::bind(addr).context("Failed to bind TCP listener")?;
-    let bound_port = listener.local_addr()?.port();
-    let server = Server::from_listener(listener, None)
-        .map_err(|e| anyhow::anyhow!("Failed to create HTTP server: {}", e))?;
-    let url = format!("http://127.0.0.1:{}/", bound_port);
+pub fn run(
+    pr_context: &PrContext,
+    binds: &[String],
+    port: Option<u16>,
+    no_open: bool,
+) -> Result<()> {
+    // Bind the first address first so we know the port number (kernel-picked
+    // when port is None). Subsequent binds reuse that port so all interfaces
+    // serve on the same port — this is what lets peer discovery still work
+    // with a single port-file entry.
+    let bind_list: Vec<String> = if binds.is_empty() {
+        vec!["127.0.0.1".to_string()]
+    } else {
+        binds.to_vec()
+    };
 
+    let first_addr = parse_socket_addr(&bind_list[0], port.unwrap_or(0))?;
+    let first_listener =
+        TcpListener::bind(first_addr).with_context(|| format!("bind {}", first_addr))?;
+    let bound_port = first_listener.local_addr()?.port();
+    let mut listeners = vec![(bind_list[0].clone(), first_listener)];
+    for bind in &bind_list[1..] {
+        let addr = parse_socket_addr(bind, bound_port)?;
+        let l = TcpListener::bind(addr).with_context(|| format!("bind {}", addr))?;
+        listeners.push((bind.clone(), l));
+    }
+
+    // Port file records the port only (we assume 127.0.0.1 is reachable on
+    // the same machine — peer discovery always talks via loopback).
     let port_file = write_port_file(pr_context, bound_port)?;
 
     let shared = Arc::new(Shared {
+        pr_context: pr_context.clone(),
         state: Mutex::new(State {
             pr: Some(PrDto {
                 owner: pr_context.owner.clone(),
@@ -185,39 +207,51 @@ pub fn run(pr_context: &PrContext, port: Option<u16>, no_open: bool) -> Result<(
     let shared_peers = Arc::clone(&shared);
     thread::spawn(move || peers_poll_loop(bound_port, shared_peers));
 
-    eprintln!("pr-loop web: serving at {}", url);
+    // Spin up one HTTP server per bind address, all dispatching to the same
+    // handler through the shared Arc.
+    let mut handles = Vec::new();
+    let primary_url = format!("http://{}:{}/", bind_list[0], bound_port);
+    for (bind, listener) in listeners {
+        let server = Server::from_listener(listener, None)
+            .map_err(|e| anyhow::anyhow!("Failed to create HTTP server on {}: {}", bind, e))?;
+        eprintln!("pr-loop web: listening on http://{}:{}/", bind, bound_port);
+        let shared = Arc::clone(&shared);
+        handles.push(thread::spawn(move || {
+            for request in server.incoming_requests() {
+                if let Err(e) = handle_request(request, &shared) {
+                    eprintln!("web: request error: {}", e);
+                }
+            }
+        }));
+    }
+
     eprintln!("PR: {}/{}#{}", pr_context.owner, pr_context.repo, pr_context.pr_number);
     if !no_open {
-        if let Err(e) = open::that(&url) {
+        if let Err(e) = open::that(&primary_url) {
             eprintln!("Warning: Failed to open browser: {}. Open the URL manually.", e);
         }
     }
 
-    // Ctrl-C cleanup for the port file
-    let port_file_clone = port_file.clone();
-    let _ = ctrlc_cleanup(port_file_clone);
+    let _ = ctrlc_cleanup(port_file.clone());
 
-    // Request loop
-    let pr_for_handlers = pr_context.clone();
-    for request in server.incoming_requests() {
-        let shared = Arc::clone(&shared);
-        let pr_ctx = pr_for_handlers.clone();
-        // Handle synchronously — requests are cheap and the workload is small.
-        // A reply or resolve mutation may take ~1s but that's fine for a local UI.
-        if let Err(e) = handle_request(request, &shared, &pr_ctx) {
-            eprintln!("web: request error: {}", e);
-        }
+    // Wait for all listener threads (they won't exit on their own, but
+    // joining avoids early exit if somehow they all close).
+    for h in handles {
+        let _ = h.join();
     }
 
     let _ = std::fs::remove_file(&port_file);
     Ok(())
 }
 
-fn handle_request(
-    mut request: tiny_http::Request,
-    shared: &Arc<Shared>,
-    pr_context: &PrContext,
-) -> Result<()> {
+fn parse_socket_addr(host: &str, port: u16) -> Result<SocketAddr> {
+    let s = format!("{}:{}", host, port);
+    s.parse::<SocketAddr>()
+        .with_context(|| format!("parse bind address {}", s))
+}
+
+fn handle_request(mut request: tiny_http::Request, shared: &Arc<Shared>) -> Result<()> {
+    let pr_context = &shared.pr_context;
     let method = request.method().clone();
     let url = request.url().to_string();
     let path = url.split('?').next().unwrap_or(&url).to_string();
@@ -453,16 +487,29 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 }
 
 fn port_file_path(pr_context: &PrContext) -> Result<PathBuf> {
+    port_file_path_for(&pr_context.owner, &pr_context.repo, pr_context.pr_number)
+}
+
+/// Resolve the port file for a given owner/repo/pr-number (without needing
+/// a full PrContext). Used by the hub to look up a peer's port by identity.
+pub fn port_file_path_for(owner: &str, repo: &str, pr_number: u64) -> Result<PathBuf> {
     let base = dirs_cache()?;
     let dir = base.join("pr-loop");
     std::fs::create_dir_all(&dir).context("create cache dir")?;
     let safe = format!(
         "web-{}-{}-{}.port",
-        sanitize(&pr_context.owner),
-        sanitize(&pr_context.repo),
-        pr_context.pr_number
+        sanitize(owner),
+        sanitize(repo),
+        pr_number
     );
     Ok(dir.join(safe))
+}
+
+/// Read the port file for a specific PR, returning the port number if present.
+pub fn read_port(owner: &str, repo: &str, pr_number: u64) -> Option<u16> {
+    let path = port_file_path_for(owner, repo, pr_number).ok()?;
+    let s = std::fs::read_to_string(&path).ok()?;
+    s.trim().parse().ok()
 }
 
 fn sanitize(s: &str) -> String {

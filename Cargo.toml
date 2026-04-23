@@ -33,6 +33,9 @@ open = "5"
 # URL-safe percent encoding (for port-file paths and URL components)
 urlencoding = "2"
 
+# TOML parsing for ~/.config/pr-loop/config.toml
+toml = "0.8"
+
 [dev-dependencies]
 # Testing utilities
 tokio-test = "0.4"

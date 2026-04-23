@@ -7,6 +7,7 @@ mod checks;
 mod circleci;
 mod cli;
 mod commits;
+mod config;
 mod credentials;
 mod gh_actions;
 mod git;
@@ -45,21 +46,55 @@ use wait::{capture_snapshot, wait_until_actionable, wait_until_actionable_or_hap
 fn main() {
     let cli = Cli::parse();
 
-    // Hub subcommand doesn't need PR context, credentials, or anything else;
-    // handle it (and --install/--uninstall) before the rest of setup.
-    if let Some(Command::Hub { port, install, uninstall }) = &cli.command {
-        let result = if *install {
-            hub::install()
-        } else if *uninstall {
-            hub::uninstall()
-        } else {
-            hub::run(*port)
-        };
-        if let Err(e) = result {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
+    // Commands that don't need PR context, credentials, or GitHub access:
+    // handle them before the rest of setup.
+    match &cli.command {
+        Some(Command::Hub { port, bind, install, uninstall }) => {
+            let cfg = config::load();
+            let result = if *install {
+                hub::install()
+            } else if *uninstall {
+                hub::uninstall()
+            } else {
+                let resolved_port = port.unwrap_or_else(|| cfg.hub_port());
+                let resolved_binds = if !bind.is_empty() {
+                    bind.clone()
+                } else {
+                    cfg.hub_binds()
+                };
+                hub::run(&resolved_binds, resolved_port)
+            };
+            if let Err(e) = result {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+            return;
         }
-        return;
+        Some(Command::Config { action }) => {
+            match action {
+                cli::ConfigAction::Path => {
+                    match config::config_path() {
+                        Ok(p) => println!("{}", p.display()),
+                        Err(e) => {
+                            eprintln!("Error: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                cli::ConfigAction::Print => {
+                    let cfg = config::load();
+                    match toml::to_string_pretty(&cfg) {
+                        Ok(s) => print!("{}", s),
+                        Err(e) => {
+                            eprintln!("Error: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        _ => {}
     }
 
     // Get credentials
@@ -206,14 +241,20 @@ fn main() {
             );
         }
 
-        Some(Command::Web { port, no_open }) => {
-            if let Err(e) = web::run(&pr_context, port, no_open) {
+        Some(Command::Web { port, no_open, bind }) => {
+            let cfg = config::load();
+            let resolved_binds = if !bind.is_empty() {
+                bind
+            } else {
+                cfg.web_binds()
+            };
+            if let Err(e) = web::run(&pr_context, &resolved_binds, port, no_open) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
         }
 
-        Some(Command::Hub { .. }) => {
+        Some(Command::Hub { .. }) | Some(Command::Config { .. }) => {
             // Handled above before setup; unreachable.
             unreachable!();
         }

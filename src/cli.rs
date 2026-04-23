@@ -110,27 +110,51 @@ pub enum Command {
         /// Don't auto-open a browser window; just print the URL.
         #[arg(long)]
         no_open: bool,
+
+        /// Address(es) to bind on. Overrides config file's `[web].bind`.
+        /// Repeat for multiple: `--bind 127.0.0.1 --bind 100.64.1.2`.
+        #[arg(long)]
+        bind: Vec<String>,
     },
 
-    /// Run a tiny fixed-port redirector that points at whichever `pr-loop web`
-    /// instances you have running. Intended to run at login so you can keep
-    /// a single bookmark like http://127.0.0.1:10099/ that always "just works".
+    /// Run a tiny fixed-port proxy that fronts your running `pr-loop web`
+    /// instances. Intended to run at login so you can keep a single bookmark
+    /// like http://127.0.0.1:10099/ that always "just works".
     /// (Port 10099 reads as "LOOpp" if you squint.)
     Hub {
-        /// TCP port to bind on (default: 10099, "LOOpp").
-        #[arg(long, default_value = "10099")]
-        port: u16,
+        /// TCP port to bind on. Overrides config file's `[hub].port`.
+        #[arg(long)]
+        port: Option<u16>,
 
-        /// Write a LaunchAgent plist to ~/Library/LaunchAgents and print the
-        /// `launchctl load` command. Does NOT load it automatically.
+        /// Address(es) to bind on. Overrides config file's `[hub].bind`.
+        /// Repeat for multiple: `--bind 127.0.0.1 --bind 100.64.1.2`.
+        #[arg(long)]
+        bind: Vec<String>,
+
+        /// Write a LaunchAgent plist to ~/Library/LaunchAgents. Does NOT
+        /// start it automatically; prints the `launchctl bootstrap` command.
         #[arg(long, conflicts_with = "uninstall")]
         install: bool,
 
-        /// Print the `launchctl unload` command for the installed LaunchAgent
-        /// plist and then delete the plist file. Does NOT unload it.
+        /// Print the `launchctl bootout` and `rm` commands for the installed
+        /// LaunchAgent. Does NOT run them automatically.
         #[arg(long, conflicts_with = "install")]
         uninstall: bool,
     },
+
+    /// Inspect the config file (~/.config/pr-loop/config.toml).
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum ConfigAction {
+    /// Print the path to the config file (whether or not it exists).
+    Path,
+    /// Print the effective config (file contents + defaults filled in) as TOML.
+    Print,
 }
 
 #[cfg(test)]
@@ -395,9 +419,10 @@ mod tests {
     fn parse_web_command() {
         let cli = Cli::parse_from(["pr-loop", "web"]);
         match cli.command {
-            Some(Command::Web { port, no_open }) => {
+            Some(Command::Web { port, no_open, bind }) => {
                 assert!(port.is_none());
                 assert!(!no_open);
+                assert!(bind.is_empty());
             }
             _ => panic!("Expected Web command"),
         }
@@ -405,14 +430,69 @@ mod tests {
 
     #[test]
     fn parse_web_command_with_options() {
-        let cli = Cli::parse_from(["pr-loop", "web", "--port", "8080", "--no-open"]);
+        let cli = Cli::parse_from([
+            "pr-loop", "web",
+            "--port", "8080",
+            "--no-open",
+            "--bind", "127.0.0.1",
+            "--bind", "100.64.1.2",
+        ]);
         match cli.command {
-            Some(Command::Web { port, no_open }) => {
+            Some(Command::Web { port, no_open, bind }) => {
                 assert_eq!(port, Some(8080));
                 assert!(no_open);
+                assert_eq!(bind, vec!["127.0.0.1".to_string(), "100.64.1.2".to_string()]);
             }
             _ => panic!("Expected Web command"),
         }
+    }
+
+    #[test]
+    fn parse_hub_command_defaults() {
+        let cli = Cli::parse_from(["pr-loop", "hub"]);
+        match cli.command {
+            Some(Command::Hub { port, bind, install, uninstall }) => {
+                assert!(port.is_none());
+                assert!(bind.is_empty());
+                assert!(!install);
+                assert!(!uninstall);
+            }
+            _ => panic!("Expected Hub command"),
+        }
+    }
+
+    #[test]
+    fn parse_hub_command_with_flags() {
+        let cli = Cli::parse_from([
+            "pr-loop", "hub",
+            "--port", "11111",
+            "--bind", "0.0.0.0",
+        ]);
+        match cli.command {
+            Some(Command::Hub { port, bind, .. }) => {
+                assert_eq!(port, Some(11111));
+                assert_eq!(bind, vec!["0.0.0.0".to_string()]);
+            }
+            _ => panic!("Expected Hub command"),
+        }
+    }
+
+    #[test]
+    fn parse_config_path() {
+        let cli = Cli::parse_from(["pr-loop", "config", "path"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Config { action: ConfigAction::Path })
+        ));
+    }
+
+    #[test]
+    fn parse_config_print() {
+        let cli = Cli::parse_from(["pr-loop", "config", "print"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Config { action: ConfigAction::Print })
+        ));
     }
 
     #[test]
