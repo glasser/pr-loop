@@ -197,26 +197,17 @@
     font-size: 11px;
   }
   #ci-strip .check {
-    display: flex;
-    gap: 6px;
-    align-items: baseline;
     padding: 1px 0;
   }
-  #ci-strip .check .dot {
+  #ci-strip .check .glyph {
     display: inline-block;
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    flex-shrink: 0;
+    width: 1.2em;
   }
-  #ci-strip .check.pass .dot { background: var(--ok-fg); }
-  #ci-strip .check.fail .dot { background: var(--danger-fg); }
-  #ci-strip .check.pending .dot {
-    background: transparent;
-    box-shadow: inset 0 0 0 1px var(--muted);
-  }
-  #ci-strip .check.skipping .dot, #ci-strip .check.cancelled .dot {
-    background: var(--border);
+  #ci-strip .check.pass .glyph { color: var(--ok-fg); }
+  #ci-strip .check.fail .glyph { color: var(--danger-fg); }
+  #ci-strip .check.pending .glyph { color: var(--muted); }
+  #ci-strip .check.skipping .glyph, #ci-strip .check.cancelled .glyph {
+    color: var(--muted);
   }
   #ci-strip .check a { color: inherit; text-decoration: none; }
   #ci-strip .check a:hover { text-decoration: underline; }
@@ -779,6 +770,14 @@ function CiStrip({ checks }) {
     (order[a.status] ?? 9) - (order[b.status] ?? 9) || a.name.localeCompare(b.name)
   );
 
+  const glyphFor = (status) => ({
+    pass: '✓',
+    fail: '✗',
+    pending: '○',
+    skipping: '⊘',
+    cancelled: '⊘',
+  }[status] || '?');
+
   return html`
     <div id="ci-strip">
       <span>CI:</span>
@@ -789,7 +788,7 @@ function CiStrip({ checks }) {
         <div class="check-list">
           ${sorted.map(c => html`
             <div class=${'check ' + c.status} key=${c.name}>
-              <span class="dot"></span>
+              <span class="glyph">${glyphFor(c.status)}</span>
               ${c.url
                 ? html`<a href=${c.url} target="_blank">${c.name}</a>`
                 : html`<span>${c.name}</span>`}
