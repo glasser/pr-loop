@@ -183,7 +183,7 @@ pub fn install() -> Result<()> {
     println!();
     println!("  launchctl bootstrap gui/$UID {}", plist_path.display());
     println!();
-    println!("Then open http://127.0.0.1:48817/ and bookmark it.");
+    println!("Then open http://127.0.0.1:10099/ and bookmark it.");
     println!();
     println!("Note: the plist pins the binary to its current path. If you");
     println!("move or rebuild somewhere else, rerun `pr-loop hub --install`.");

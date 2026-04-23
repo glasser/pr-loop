@@ -114,10 +114,11 @@ pub enum Command {
 
     /// Run a tiny fixed-port redirector that points at whichever `pr-loop web`
     /// instances you have running. Intended to run at login so you can keep
-    /// a single bookmark like http://127.0.0.1:48817/ that always "just works".
+    /// a single bookmark like http://127.0.0.1:10099/ that always "just works".
+    /// (Port 10099 reads as "LOOpp" if you squint.)
     Hub {
-        /// TCP port to bind on (default: 48817).
-        #[arg(long, default_value = "48817")]
+        /// TCP port to bind on (default: 10099, "LOOpp").
+        #[arg(long, default_value = "10099")]
         port: u16,
 
         /// Write a LaunchAgent plist to ~/Library/LaunchAgents and print the
