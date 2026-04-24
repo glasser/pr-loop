@@ -312,12 +312,21 @@
   }
   .thread-header .chevron {
     cursor: pointer;
-    font-size: 11px;
+    font-size: 16px;
+    line-height: 1;
     color: var(--muted);
     user-select: none;
-    padding: 0 2px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 20px;
   }
-  .thread-header .chevron:hover { color: var(--fg); }
+  .thread-header .chevron:hover {
+    color: var(--fg);
+    background: var(--border-muted);
+  }
   .thread.collapsed .thread-header {
     border-bottom-left-radius: 6px;
     border-bottom-right-radius: 6px;
@@ -1118,9 +1127,11 @@ function App() {
       </div>
       <div id="layout">
         <div id="threads">
-          ${threads.length === 0
-            ? html`<div class="empty"><div class="big">🎉</div>No unresolved review threads.</div>`
-            : threads.map(t => html`<${Thread} thread=${t} onPoke=${poll} key=${t.id} />`)}
+          ${threads.length > 0
+            ? threads.map(t => html`<${Thread} thread=${t} onPoke=${poll} key=${t.id} />`)
+            : !data.last_fetched_at
+              ? html`<div class="empty">Waiting for first GitHub fetch…</div>`
+              : html`<div class="empty"><div class="big">🎉</div>No unresolved review threads.</div>`}
         </div>
         <div id="commits-panel">
           <h2>Commits</h2>
