@@ -567,6 +567,44 @@ md.renderer.rules.fence = (tokens, idx, options, env, self) => {
 
 const CLAUDE_MARKER_RE = /^🤖 From Claude:\s?/;
 
+/// Sort threads so threads that have at least one Claude comment float to
+/// the top (ordered by most-recent-Claude-comment, newest first), and
+/// threads without any Claude comment come below (ordered by most-recent
+/// comment, newest first). Missing timestamps sort last within each group.
+function sortThreads(threads) {
+  const keyed = threads.map(t => {
+    let newestClaude = null;
+    let newestAny = null;
+    for (const c of t.comments || []) {
+      const ts = c.created_at || null;
+      if (ts) {
+        if (!newestAny || ts > newestAny) newestAny = ts;
+        if (c.body && CLAUDE_MARKER_RE.test(c.body)) {
+          if (!newestClaude || ts > newestClaude) newestClaude = ts;
+        }
+      }
+    }
+    return { t, newestClaude, newestAny };
+  });
+  keyed.sort((a, b) => {
+    // Claude-touched threads first.
+    if (!!a.newestClaude !== !!b.newestClaude) {
+      return a.newestClaude ? -1 : 1;
+    }
+    if (a.newestClaude && b.newestClaude) {
+      return b.newestClaude.localeCompare(a.newestClaude);
+    }
+    // Neither has a Claude comment — sort by newest-overall, newest first.
+    if (a.newestAny && b.newestAny) {
+      return b.newestAny.localeCompare(a.newestAny);
+    }
+    if (a.newestAny) return -1;
+    if (b.newestAny) return 1;
+    return 0;
+  });
+  return keyed.map(k => k.t);
+}
+
 function relativeTime(iso) {
   if (!iso) return '';
   const then = new Date(iso).getTime();
@@ -1026,7 +1064,9 @@ function App() {
   }
 
   const connectionLost = failures >= 3;
-  const threads = (data.threads || []).filter(t => !t.is_resolved && !t.is_paperclip);
+  const threads = sortThreads(
+    (data.threads || []).filter(t => !t.is_resolved && !t.is_paperclip)
+  );
 
   const metaBits = [];
   if (data.last_fetched_at) metaBits.push(`GitHub synced ${relativeTime(data.last_fetched_at)}`);
