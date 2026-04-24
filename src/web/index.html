@@ -310,6 +310,20 @@
     display: flex;
     gap: 8px;
   }
+  .thread-header .chevron {
+    cursor: pointer;
+    font-size: 11px;
+    color: var(--muted);
+    user-select: none;
+    padding: 0 2px;
+  }
+  .thread-header .chevron:hover { color: var(--fg); }
+  .thread.collapsed .thread-header {
+    border-bottom-left-radius: 6px;
+    border-bottom-right-radius: 6px;
+    border-bottom: none;
+  }
+  .thread.collapsed .thread-body { display: none; }
   .thread-body {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -703,6 +717,7 @@ function Thread({ thread, onPoke }) {
   const [reply, setReply] = useState('');
   const [posting, setPosting] = useState(false);
   const [resolving, setResolving] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
 
   const diffHunk = thread.comments[0] && thread.comments[0].diff_hunk;
   const firstCommentUrl = thread.comments[0] && thread.comments[0].url;
@@ -712,6 +727,10 @@ function Thread({ thread, onPoke }) {
 
   async function doResolve() {
     setResolving(true);
+    // Collapse immediately for a snappier UI; the thread will usually
+    // disappear entirely once the resolve settles and the poll returns
+    // fresh state. If resolve fails, we uncollapse below.
+    setCollapsed(true);
     try {
       const res = await fetch(`api/threads/${encodeURIComponent(thread.id)}/resolve`, { method: 'POST' });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -719,6 +738,7 @@ function Thread({ thread, onPoke }) {
     } catch (e) {
       alert(`Failed to resolve: ${e.message}`);
       setResolving(false);
+      setCollapsed(false);
     }
   }
 
@@ -743,8 +763,14 @@ function Thread({ thread, onPoke }) {
   }
 
   return html`
-    <div class="thread ${thread.is_outdated ? 'outdated' : ''}">
+    <div class=${'thread' + (thread.is_outdated ? ' outdated' : '') + (collapsed ? ' collapsed' : '')}>
       <div class="thread-header">
+        <span
+          class="chevron"
+          role="button"
+          title=${collapsed ? 'Expand' : 'Collapse'}
+          onClick=${() => setCollapsed(c => !c)}
+        >${collapsed ? '▸' : '▾'}</span>
         ${firstCommentUrl
           ? html`<a class="location" href=${firstCommentUrl} target="_blank">${location}</a>`
           : html`<span class="location">${location}</span>`}
