@@ -70,6 +70,53 @@ fn main() {
             }
             return;
         }
+        Some(Command::CcStatus) => {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let diag = cc_status::diagnose_cc_status(&cwd);
+            println!("cwd:              {}", diag.cwd.display());
+            println!(
+                "project dir:      {}",
+                diag.project_dir
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "<none>".to_string())
+            );
+            println!(
+                "transcript:       {}",
+                diag.transcript
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "<none>".to_string())
+            );
+            println!(
+                "sessionId:        {}",
+                diag.session_id.as_deref().unwrap_or("<none>")
+            );
+            println!(
+                "session file:     {}",
+                diag.session_file
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "<none — CC running? version too old?>".to_string())
+            );
+            println!(
+                "session status:   {}",
+                diag.session_status_raw.as_deref().unwrap_or("<none>")
+            );
+            println!(
+                "session waitingFor: {}",
+                diag.session_waiting_for.as_deref().unwrap_or("<none>")
+            );
+            println!();
+            match &diag.status {
+                Some(s) => {
+                    let json = serde_json::to_string_pretty(s).unwrap_or_default();
+                    println!("{}", json);
+                }
+                None => println!("<no CcStatus computed>"),
+            }
+            return;
+        }
         Some(Command::Config { action }) => {
             match action {
                 cli::ConfigAction::Path => {
@@ -254,7 +301,7 @@ fn main() {
             }
         }
 
-        Some(Command::Hub { .. }) | Some(Command::Config { .. }) => {
+        Some(Command::Hub { .. }) | Some(Command::Config { .. }) | Some(Command::CcStatus) => {
             // Handled above before setup; unreachable.
             unreachable!();
         }

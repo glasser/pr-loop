@@ -40,6 +40,9 @@ pub enum CcActivity {
     /// Last event was an assistant message with no pending tool — CC is done
     /// with its turn and waiting for a new user prompt.
     Idle,
+    /// CC is blocked on a permission prompt (or other user-approval gate).
+    /// Detected from the session JSON, not the transcript.
+    Waiting,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -51,13 +54,152 @@ pub struct CcStatus {
     pub last_completed_tool: Option<InFlightTool>,
     pub last_activity_at: Option<String>,
     pub last_assistant_text: Option<String>,
+    /// When `activity == Waiting`, the `waitingFor` string from the session
+    /// JSON (e.g., "approve Edit"). None otherwise.
+    pub waiting_for: Option<String>,
 }
 
 pub fn read_cc_status(cwd: &Path) -> Option<CcStatus> {
-    let dir = session_dir_for_cwd(cwd)?;
-    let file = newest_jsonl(&dir)?;
-    let content = read_tail(&file, MAX_TAIL_BYTES).ok()?;
-    Some(parse_events(&content))
+    diagnose_cc_status(cwd).status
+}
+
+/// Detailed breakdown of what `read_cc_status` saw while computing the
+/// returned status. Intended for the `cc-status` debug subcommand.
+pub struct CcStatusDiagnostics {
+    pub cwd: PathBuf,
+    pub project_dir: Option<PathBuf>,
+    pub transcript: Option<PathBuf>,
+    pub session_id: Option<String>,
+    pub session_file: Option<PathBuf>,
+    pub session_status_raw: Option<String>,
+    pub session_waiting_for: Option<String>,
+    pub status: Option<CcStatus>,
+}
+
+pub fn diagnose_cc_status(cwd: &Path) -> CcStatusDiagnostics {
+    let mut diag = CcStatusDiagnostics {
+        cwd: cwd.to_path_buf(),
+        project_dir: None,
+        transcript: None,
+        session_id: None,
+        session_file: None,
+        session_status_raw: None,
+        session_waiting_for: None,
+        status: None,
+    };
+    let Some(dir) = session_dir_for_cwd(cwd) else { return diag };
+    diag.project_dir = Some(dir.clone());
+
+    // Content comes from the most-recently-written transcript in the
+    // project dir. The sessionId in the live session JSON can't be trusted
+    // to point at the active transcript — `claude -c` rotates the sessionId
+    // on continue without updating the session file's sessionId field.
+    let Some(file) = newest_jsonl(&dir) else { return diag };
+    diag.transcript = Some(file.clone());
+    diag.session_id = file.file_stem().and_then(|s| s.to_str()).map(str::to_string);
+    let Ok(content) = read_tail(&file, MAX_TAIL_BYTES) else { return diag };
+    let mut status = parse_events(&content);
+
+    // Status/waiting_for come from the most attention-worthy live session
+    // file whose cwd matches. Decoupled from the transcript choice above.
+    if let Some((path, state, _sid)) = pick_live_session_for_cwd(cwd) {
+        diag.session_file = Some(path);
+        diag.session_status_raw = state.status.clone();
+        diag.session_waiting_for = state.waiting_for.clone();
+        apply_session_state(&mut status, &state);
+    }
+
+    diag.status = Some(status);
+    diag
+}
+
+/// Scan `~/.claude/sessions/*.json`, keep entries whose `cwd` matches `cwd`
+/// (after canonicalization), and pick the most-recently-updated one.
+/// Returns `(session_file_path, session_state, sessionId)`.
+///
+/// Sorting purely by `updatedAt` fails safe against orphaned session files:
+/// a stale "waiting" file from a crashed CC can't outrank a currently-live
+/// session. The cost is that if two live CCs share a cwd and the waiting
+/// one's heartbeat happens to lag the busy one, we'd miss the waiting
+/// signal — rare enough to ignore in practice.
+fn pick_live_session_for_cwd(cwd: &Path) -> Option<(PathBuf, SessionState, String)> {
+    let target = cwd
+        .canonicalize()
+        .unwrap_or_else(|_| cwd.to_path_buf());
+    let home = std::env::var_os("HOME")?;
+    let dir = PathBuf::from(home).join(".claude/sessions");
+    let entries = std::fs::read_dir(&dir).ok()?;
+
+    let mut candidates: Vec<(i64, PathBuf, SessionState, String)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|x| x.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else { continue };
+        let Some(parsed) = parse_session_full(&content) else { continue };
+        let Some(session_cwd) = parsed.cwd.as_deref() else { continue };
+
+        // Compare cwds after canonicalization on both sides so /private/var
+        // vs /var symlinks don't cause false mismatches.
+        let session_path = std::path::PathBuf::from(session_cwd);
+        let canon = session_path.canonicalize().unwrap_or(session_path);
+        if canon != target {
+            continue;
+        }
+
+        candidates.push((parsed.updated_at, path, parsed.state, parsed.session_id));
+    }
+
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    candidates
+        .into_iter()
+        .next()
+        .map(|(_, path, state, sid)| (path, state, sid))
+}
+
+/// Richer session-file parse used by `pick_live_session_for_cwd`. Returns
+/// everything the picker needs to rank candidates.
+#[derive(Debug, Clone)]
+struct ParsedSession {
+    session_id: String,
+    cwd: Option<String>,
+    updated_at: i64,
+    state: SessionState,
+}
+
+fn parse_session_full(content: &str) -> Option<ParsedSession> {
+    let v: Value = serde_json::from_str(content).ok()?;
+    let sid = v.get("sessionId").and_then(|s| s.as_str())?.to_string();
+    let cwd = v.get("cwd").and_then(|s| s.as_str()).map(str::to_string);
+    let updated_at = v.get("updatedAt").and_then(|s| s.as_i64()).unwrap_or(0);
+    let state = SessionState {
+        status: v.get("status").and_then(|s| s.as_str()).map(str::to_string),
+        waiting_for: v
+            .get("waitingFor")
+            .and_then(|s| s.as_str())
+            .map(str::to_string),
+    };
+    Some(ParsedSession {
+        session_id: sid,
+        cwd,
+        updated_at,
+        state,
+    })
+}
+
+/// Parsed fields from `~/.claude/sessions/<pid>.json`.
+#[derive(Debug, Clone, Default)]
+struct SessionState {
+    status: Option<String>,
+    waiting_for: Option<String>,
+}
+
+fn apply_session_state(status: &mut CcStatus, session: &SessionState) {
+    if session.status.as_deref() == Some("waiting") {
+        status.activity = CcActivity::Waiting;
+        status.waiting_for = session.waiting_for.clone();
+    }
 }
 
 fn session_dir_for_cwd(cwd: &Path) -> Option<PathBuf> {
@@ -155,6 +297,7 @@ fn parse_events(content: &str) -> CcStatus {
                 last_completed_tool: None,
                 last_activity_at,
                 last_assistant_text,
+                waiting_for: None,
             };
         };
 
@@ -232,6 +375,7 @@ fn parse_events(content: &str) -> CcStatus {
         last_completed_tool,
         last_activity_at,
         last_assistant_text,
+        waiting_for: None,
     }
 }
 
@@ -399,5 +543,80 @@ mod tests {
     fn truncate_respects_length() {
         assert_eq!(truncate("hi", 10), "hi");
         assert_eq!(truncate("abcdefghijkl", 5), "abcd…");
+    }
+
+    #[test]
+    fn session_json_tolerates_missing_status() {
+        // Older CC versions omit status/waitingFor — parse_session_full
+        // should still return the session, leaving apply_session_state a no-op.
+        let body = r#"{"sessionId":"abc-123","pid":1}"#;
+        let p = parse_session_full(body).expect("parse");
+        assert!(p.state.status.is_none());
+        assert!(p.state.waiting_for.is_none());
+    }
+
+    #[test]
+    fn session_json_tolerates_malformed() {
+        assert!(parse_session_full("not json").is_none());
+        assert!(parse_session_full("{}").is_none());
+    }
+
+    #[test]
+    fn apply_session_state_flips_to_waiting() {
+        let mut status = CcStatus {
+            activity: CcActivity::Running,
+            in_flight: vec![InFlightTool {
+                name: "Edit".into(),
+                started_at: "2026-01-01T00:00:00Z".into(),
+                preview: Some("foo.rs".into()),
+                is_sidechain: false,
+            }],
+            last_completed_tool: None,
+            last_activity_at: None,
+            last_assistant_text: None,
+            waiting_for: None,
+        };
+        apply_session_state(
+            &mut status,
+            &SessionState {
+                status: Some("waiting".into()),
+                waiting_for: Some("approve Edit".into()),
+            },
+        );
+        assert!(matches!(status.activity, CcActivity::Waiting));
+        assert_eq!(status.waiting_for.as_deref(), Some("approve Edit"));
+        // In-flight tool is preserved — the UI can still say "waiting on Edit foo.rs".
+        assert_eq!(status.in_flight.len(), 1);
+    }
+
+    #[test]
+    fn parse_session_full_captures_fields() {
+        let body = r#"{"pid":1,"sessionId":"sid","cwd":"/x/y","status":"waiting","waitingFor":"approve Edit","updatedAt":42}"#;
+        let p = parse_session_full(body).expect("parse");
+        assert_eq!(p.session_id, "sid");
+        assert_eq!(p.cwd.as_deref(), Some("/x/y"));
+        assert_eq!(p.updated_at, 42);
+        assert_eq!(p.state.status.as_deref(), Some("waiting"));
+        assert_eq!(p.state.waiting_for.as_deref(), Some("approve Edit"));
+    }
+
+    #[test]
+    fn apply_session_state_ignores_non_waiting() {
+        let mut status = CcStatus {
+            activity: CcActivity::Running,
+            in_flight: vec![],
+            last_completed_tool: None,
+            last_activity_at: None,
+            last_assistant_text: None,
+            waiting_for: None,
+        };
+        apply_session_state(
+            &mut status,
+            &SessionState {
+                status: Some("idle".into()),
+                waiting_for: None,
+            },
+        );
+        assert!(matches!(status.activity, CcActivity::Running));
     }
 }

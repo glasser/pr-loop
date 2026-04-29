@@ -149,6 +149,12 @@ pub enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
+
+    /// Print the Claude Code status that `pr-loop web` infers for the current
+    /// directory — the transcript path it picked, the session file it matched,
+    /// and the resulting activity. Useful for debugging why the web UI isn't
+    /// showing the expected state.
+    CcStatus,
 }
 
 #[derive(clap::Subcommand, Debug)]

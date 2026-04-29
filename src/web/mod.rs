@@ -13,6 +13,7 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -150,6 +151,9 @@ struct StateResponse<'a> {
     #[serde(flatten)]
     state: &'a State,
     cc_status: Option<CcStatus>,
+    /// True when the `pr-loop` binary on disk has been rebuilt since this
+    /// process started. The UI surfaces a "restart" pill when this flips.
+    update_available: bool,
 }
 
 struct Shared {
@@ -158,6 +162,9 @@ struct Shared {
     peers: Mutex<Vec<PeerSummary>>,
     // Condvar-paired flag so handlers can poke the poller.
     trigger: (Mutex<bool>, Condvar),
+    /// Flips to true when our binary's mtime changes. Never flips back —
+    /// the UI's restart action is the only way to "reset" it (via exec).
+    update_available: AtomicBool,
 }
 
 impl Shared {
@@ -223,7 +230,24 @@ pub fn run(
         }),
         peers: Mutex::new(vec![]),
         trigger: (Mutex::new(false), Condvar::new()),
+        update_available: AtomicBool::new(false),
     });
+
+    // Watch our own binary for rebuilds. Canonicalize so we follow symlinks
+    // (e.g., ~/.dotfiles/bin/pr-loop → target/release/pr-loop) and watch
+    // the file `cargo build` actually rewrites. Best-effort — if any of
+    // this fails we just skip the thread.
+    if let Some((exe, mtime)) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.canonicalize().ok())
+        .and_then(|p| std::fs::metadata(&p).and_then(|m| m.modified()).ok().map(|m| (p, m)))
+    {
+        eprintln!("pr-loop web: watching binary for rebuilds at {}", exe.display());
+        let shared_watch = Arc::clone(&shared);
+        thread::spawn(move || watch_binary_mtime(exe, mtime, shared_watch));
+    } else {
+        eprintln!("pr-loop web: could not resolve binary path — restart detection disabled");
+    }
 
     // Poller thread for our own PR state
     let pr_clone = pr_context.clone();
@@ -301,6 +325,7 @@ fn handle_request(mut request: tiny_http::Request, shared: &Arc<Shared>) -> Resu
             let response = StateResponse {
                 state: &state,
                 cc_status,
+                update_available: shared.update_available.load(Ordering::Relaxed),
             };
             let body = serde_json::to_string(&response)?;
             build_response(body, "application/json", 200)
@@ -308,6 +333,21 @@ fn handle_request(mut request: tiny_http::Request, shared: &Arc<Shared>) -> Resu
         (&Method::Post, "/api/poke") => {
             shared.poke();
             build_response("{}".to_string(), "application/json", 200)
+        }
+        (&Method::Post, "/api/restart") => {
+            #[cfg(unix)]
+            {
+                thread::spawn(restart_self);
+                build_response("{}".to_string(), "application/json", 200)
+            }
+            #[cfg(not(unix))]
+            {
+                build_response(
+                    r#"{"error":"restart is only supported on Unix"}"#.to_string(),
+                    "application/json",
+                    501,
+                )
+            }
         }
         (&Method::Get, "/api/peers") => {
             let peers = shared.peers.lock().unwrap().clone();
@@ -757,6 +797,49 @@ pub fn poke_running_server(pr_context: &PrContext) {
     };
     let url = format!("http://127.0.0.1:{}/api/poke", port);
     let _ = client.post(&url).send();
+}
+
+/// Poll the binary's mtime every few seconds; when it changes from what we
+/// observed at startup, mark an update as available. Runs forever.
+fn watch_binary_mtime(exe: PathBuf, original_mtime: SystemTime, shared: Arc<Shared>) {
+    let mut announced = false;
+    loop {
+        thread::sleep(Duration::from_secs(2));
+        let Ok(meta) = std::fs::metadata(&exe) else { continue };
+        let Ok(m) = meta.modified() else { continue };
+        if m != original_mtime {
+            if !announced {
+                eprintln!("pr-loop web: detected binary rebuild at {}", exe.display());
+                announced = true;
+            }
+            shared.update_available.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Re-exec ourselves with the original argv after a short pause so the
+/// restart HTTP response has time to flush. Never returns on success.
+#[cfg(unix)]
+fn restart_self() {
+    use std::os::unix::process::CommandExt;
+    thread::sleep(Duration::from_millis(200));
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("pr-loop web: restart failed (current_exe): {}", e);
+            std::process::exit(1);
+        }
+    };
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    eprintln!(
+        "pr-loop web: restarting via exec: {} {}",
+        exe.display(),
+        args.join(" ")
+    );
+    let err = std::process::Command::new(exe).args(&args).exec();
+    // exec() only returns on failure.
+    eprintln!("pr-loop web: restart failed (exec): {}", err);
+    std::process::exit(1);
 }
 
 fn ctrlc_cleanup(port_file: PathBuf) -> Result<()> {

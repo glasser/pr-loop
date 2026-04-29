@@ -137,6 +137,63 @@
     background: var(--border-muted);
     color: var(--muted);
   }
+  #cc-waiting-overlay {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: min(560px, 90vw);
+    padding: 28px 32px;
+    background: var(--danger-bg);
+    color: var(--danger-fg);
+    border: 3px solid var(--danger-fg);
+    border-radius: 10px;
+    box-shadow: 0 12px 48px rgba(0,0,0,0.25),
+                0 0 0 0 var(--danger-fg);
+    text-align: center;
+    z-index: 1000;
+    animation: cc-waiting-pulse 1.3s ease-in-out infinite;
+  }
+  #cc-waiting-overlay .headline {
+    font-size: 26px;
+    font-weight: 700;
+    margin: 0;
+    letter-spacing: 0.01em;
+  }
+  #cc-waiting-overlay .reason {
+    margin-top: 10px;
+    font-size: 16px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    opacity: 0.9;
+  }
+  #cc-waiting-overlay .hint {
+    margin-top: 14px;
+    font-size: 12px;
+    opacity: 0.75;
+  }
+  @keyframes cc-waiting-pulse {
+    0%, 100% { box-shadow: 0 12px 48px rgba(0,0,0,0.25), 0 0 0 0 var(--danger-fg); }
+    50%      { box-shadow: 0 12px 48px rgba(0,0,0,0.25), 0 0 0 14px transparent; }
+  }
+  .restart-pill {
+    font: inherit;
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 12px;
+    border: 1px solid var(--accent);
+    background: var(--bg);
+    color: var(--accent);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .restart-pill:hover:not(:disabled) {
+    background: var(--accent);
+    color: var(--bg);
+  }
+  .restart-pill:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
   #header {
     padding: 12px 16px;
     border-bottom: 1px solid var(--border);
@@ -889,6 +946,34 @@ function CiStrip({ checks }) {
   `;
 }
 
+function RestartPill() {
+  const [clicked, setClicked] = useState(false);
+  const onClick = async () => {
+    if (clicked) return;
+    setClicked(true);
+    try { await fetch('api/restart', { method: 'POST' }); } catch (_) {}
+    // The server re-execs, so the /api/state poll will error for a second;
+    // the existing connection-lost banner handles the gap.
+  };
+  return html`
+    <button class="restart-pill" onClick=${onClick} disabled=${clicked} title="pr-loop binary has been rebuilt — click to restart this server">
+      ${clicked ? 'Restarting…' : 'pr-loop updated — restart'}
+    </button>
+  `;
+}
+
+function CcWaitingOverlay({ status }) {
+  if (!status || status.activity !== 'waiting') return null;
+  const reason = status.waiting_for;
+  return html`
+    <div id="cc-waiting-overlay" role="alert" aria-live="assertive">
+      <p class="headline">Claude is waiting for your input</p>
+      ${reason && html`<div class="reason">${reason}</div>`}
+      <div class="hint">Check the terminal where Claude Code is running.</div>
+    </div>
+  `;
+}
+
 function CcStrip({ status }) {
   if (!status) {
     return html`
@@ -946,6 +1031,20 @@ function CcStrip({ status }) {
           ${lastToolBits}
         </div>
         ${lastTextRow}
+      </div>
+    `;
+  }
+
+  if (activity === 'waiting') {
+    // Big banner handles the loud alert. Keep the strip minimal — the user's
+    // eye is already drawn to the overlay.
+    return html`
+      <div id="cc-strip" class="thinking">
+        <div class="row">
+          <span class="dot"></span>
+          <span>Claude Code <b>waiting</b>${status.waiting_for ? `: ${status.waiting_for}` : ''}</span>
+          ${lastToolBits}
+        </div>
       </div>
     `;
   }
@@ -1068,14 +1167,18 @@ function App() {
     return () => clearInterval(id);
   }, []);
 
-  // Keep the browser tab title in sync with the PR.
+  // Keep the browser tab title in sync with the PR. When Claude is blocked
+  // on a permission prompt, prefix the title so the user spots it in the
+  // tab strip even without looking at the page.
+  const waiting = data && data.cc_status && data.cc_status.activity === 'waiting';
   useEffect(() => {
     if (!data || !data.pr) return;
     const pr = data.pr;
-    document.title = pr.title
+    const base = pr.title
       ? `${pr.title} #${pr.pr_number}`
       : `${pr.owner}/${pr.repo} #${pr.pr_number}`;
-  }, [data && data.pr && data.pr.title, data && data.pr && data.pr.pr_number]);
+    document.title = waiting ? `[WAITING] ${base}` : base;
+  }, [data && data.pr && data.pr.title, data && data.pr && data.pr.pr_number, waiting]);
 
   // Track freshly-arrived commits. Wait for the server's first successful
   // GitHub fetch (last_fetched_at populated) before baselining — otherwise
@@ -1127,6 +1230,7 @@ function App() {
     <div id="connection-banner" class=${connectionLost ? 'visible' : ''}>
       ⚠ Lost connection to pr-loop server. Is it still running?
     </div>
+    <${CcWaitingOverlay} status=${data.cc_status} />
     <div class=${connectionLost ? 'banner-visible' : ''}>
       <div class="top-bar" ref=${topBarRef}>
         <${CcStrip} status=${data.cc_status} />
@@ -1138,6 +1242,7 @@ function App() {
             ${data.pr.title && html`<span class="pr-title">${data.pr.title}</span>`}
           </h1>
           <div class="meta">${metaBits.join(' · ')}</div>
+          ${data.update_available && html`<${RestartPill} />`}
         </div>
         <${CiStrip} checks=${data.checks} />
       </div>
