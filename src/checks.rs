@@ -29,6 +29,23 @@ impl CheckStatus {
     }
 }
 
+/// CircleCI's commit-status description when it auto-cancels a redundant
+/// build. The job posts `failure` to the status API, but the newer pipeline
+/// is still in flight and will overwrite the status — so we treat this as
+/// pending rather than a real failure.
+const CIRCLECI_CANCELED_DESCRIPTION: &str = "Your CircleCI tests were canceled";
+
+/// Classify a check given its `gh pr checks` bucket and description.
+/// Reclassifies CircleCI auto-cancel failures as pending; otherwise defers
+/// to [`CheckStatus::from_bucket`].
+fn classify_check(bucket: &str, description: Option<&str>) -> CheckStatus {
+    let base = CheckStatus::from_bucket(bucket);
+    if base == CheckStatus::Fail && description == Some(CIRCLECI_CANCELED_DESCRIPTION) {
+        return CheckStatus::Pending;
+    }
+    base
+}
+
 /// A single CI check result.
 #[derive(Debug, Clone)]
 pub struct Check {
@@ -81,6 +98,7 @@ struct GhCheck {
     name: String,
     bucket: String,
     link: Option<String>,
+    description: Option<String>,
 }
 
 /// Fetch checks using `gh pr checks --json`.
@@ -109,8 +127,8 @@ fn fetch_checks_from_gh(owner: &str, repo: &str, pr_number: u64) -> Result<Vec<C
     Ok(gh_checks
         .into_iter()
         .map(|c| Check {
+            status: classify_check(&c.bucket, c.description.as_deref()),
             name: c.name,
-            status: CheckStatus::from_bucket(&c.bucket),
             url: c.link,
         })
         .collect())
@@ -196,6 +214,48 @@ mod tests {
         assert_eq!(CheckStatus::from_bucket("skipping"), CheckStatus::Skipping);
         assert_eq!(CheckStatus::from_bucket("cancel"), CheckStatus::Cancelled);
         assert_eq!(CheckStatus::from_bucket("unknown"), CheckStatus::Pending);
+    }
+
+    #[test]
+    fn classify_check_passes_through_normal_buckets() {
+        assert_eq!(classify_check("pass", None), CheckStatus::Pass);
+        assert_eq!(classify_check("fail", None), CheckStatus::Fail);
+        assert_eq!(
+            classify_check("fail", Some("Tests failed: 3 errors")),
+            CheckStatus::Fail
+        );
+        assert_eq!(classify_check("pending", None), CheckStatus::Pending);
+    }
+
+    #[test]
+    fn classify_check_reclassifies_circleci_cancel_as_pending() {
+        // CircleCI auto-cancel-redundant-builds: the older pipeline's jobs
+        // post `failure` with this description while a newer pipeline is
+        // still running. Treat as pending so wait-until-actionable keeps
+        // waiting for the newer pipeline's results to overwrite the status.
+        assert_eq!(
+            classify_check("fail", Some("Your CircleCI tests were canceled")),
+            CheckStatus::Pending
+        );
+    }
+
+    #[test]
+    fn classify_check_strict_match_only() {
+        // Don't match similar-but-not-identical descriptions — we want this
+        // to be conservative.
+        assert_eq!(
+            classify_check("fail", Some("Your CircleCI tests were cancelled")),
+            CheckStatus::Fail
+        );
+        assert_eq!(
+            classify_check("fail", Some("CircleCI tests were canceled")),
+            CheckStatus::Fail
+        );
+        // Don't promote a non-fail bucket.
+        assert_eq!(
+            classify_check("pass", Some("Your CircleCI tests were canceled")),
+            CheckStatus::Pass
+        );
     }
 
     #[test]
