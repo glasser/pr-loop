@@ -264,7 +264,7 @@ fn main() {
             }
         }
 
-        Some(Command::Ready { preserve_claude_threads, reviewer }) => {
+        Some(Command::Ready { preserve_claude_threads, reviewer, multiple_commits_ok }) => {
             run_ready_command(
                 &pr_client,
                 &pr_context,
@@ -272,6 +272,7 @@ fn main() {
                 &cli.exclude_checks,
                 preserve_claude_threads,
                 &reviewer,
+                multiple_commits_ok,
             );
         }
 
@@ -1047,6 +1048,7 @@ fn run_ready_command(
     exclude_checks: &[String],
     preserve_claude_threads: bool,
     reviewers: &[String],
+    multiple_commits_ok: bool,
 ) {
     let checks_client = RealChecksClient;
     let threads_client = RealThreadsClient;
@@ -1067,40 +1069,46 @@ fn run_ready_command(
         }
     }
 
-    // Step 2: Check that PR has exactly one commit
-    println!("Checking PR commit count...");
-    match pr_client.get_commit_count(&pr_context.owner, &pr_context.repo, pr_context.pr_number) {
-        Ok(1) => {
-            println!("✓ PR has a single commit");
-        }
-        Ok(count) => {
-            eprintln!("Error: PR has {} commits. Please squash to a single commit before marking ready.", count);
-            eprintln!();
-            eprintln!("First, fetch the latest from origin:");
-            eprintln!("  git fetch origin");
-            eprintln!();
-            eprintln!("To squash commits interactively:");
-            eprintln!("  git rebase -i origin/main");
-            eprintln!();
-            eprintln!("Or to squash all commits on this branch:");
-            eprintln!("  git reset --soft $(git merge-base HEAD origin/main) && git commit");
-            eprintln!();
-            eprintln!("When writing the squashed commit message:");
-            eprintln!("  - Describe the full change as a single cohesive commit");
-            eprintln!("  - Summarize what the PR accomplishes, not the individual commits");
-            eprintln!("  - After squashing, update the PR description to match (keep any status blocks");
-            eprintln!("    and follow any PR template in the repo)");
-            eprintln!();
-            eprintln!("After squashing and force-pushing, wait for CI to pass by running:");
-            eprintln!("  pr-loop --wait-until-actionable-or-happy --maintain-status");
-            eprintln!();
-            eprintln!("NOTE: You MUST use --wait-until-actionable-or-happy (not --wait-until-actionable)");
-            eprintln!("so that the command exits successfully when CI passes. Then run `pr-loop ready` again.");
-            std::process::exit(1);
-        }
-        Err(e) => {
-            eprintln!("Error: Failed to check PR commit count: {}", e);
-            std::process::exit(1);
+    // Step 2: Check that PR has exactly one commit (unless --multiple-commits-ok)
+    if multiple_commits_ok {
+        println!("Skipping commit count check (--multiple-commits-ok)");
+    } else {
+        println!("Checking PR commit count...");
+        match pr_client.get_commit_count(&pr_context.owner, &pr_context.repo, pr_context.pr_number) {
+            Ok(1) => {
+                println!("✓ PR has a single commit");
+            }
+            Ok(count) => {
+                eprintln!("Error: PR has {} commits. Please squash to a single commit before marking ready.", count);
+                eprintln!();
+                eprintln!("First, fetch the latest from origin:");
+                eprintln!("  git fetch origin");
+                eprintln!();
+                eprintln!("To squash commits interactively:");
+                eprintln!("  git rebase -i origin/main");
+                eprintln!();
+                eprintln!("Or to squash all commits on this branch:");
+                eprintln!("  git reset --soft $(git merge-base HEAD origin/main) && git commit");
+                eprintln!();
+                eprintln!("When writing the squashed commit message:");
+                eprintln!("  - Describe the full change as a single cohesive commit");
+                eprintln!("  - Summarize what the PR accomplishes, not the individual commits");
+                eprintln!("  - After squashing, update the PR description to match (keep any status blocks");
+                eprintln!("    and follow any PR template in the repo)");
+                eprintln!();
+                eprintln!("After squashing and force-pushing, wait for CI to pass by running:");
+                eprintln!("  pr-loop --wait-until-actionable-or-happy --maintain-status");
+                eprintln!();
+                eprintln!("NOTE: You MUST use --wait-until-actionable-or-happy (not --wait-until-actionable)");
+                eprintln!("so that the command exits successfully when CI passes. Then run `pr-loop ready` again.");
+                eprintln!();
+                eprintln!("If this repo accepts multi-commit PRs, pass --multiple-commits-ok to skip this check.");
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("Error: Failed to check PR commit count: {}", e);
+                std::process::exit(1);
+            }
         }
     }
 

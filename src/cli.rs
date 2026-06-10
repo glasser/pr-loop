@@ -88,6 +88,12 @@ pub enum Command {
         /// Can be specified multiple times: --reviewer alice --reviewer bob
         #[arg(long)]
         reviewer: Vec<String>,
+
+        /// Skip the single-commit requirement. By default, `ready` requires the PR to have
+        /// exactly one commit (to encourage a clean squashed history). Use this flag when
+        /// the repo accepts multi-commit PRs.
+        #[arg(long)]
+        multiple_commits_ok: bool,
     },
 
     /// Delete resolved review threads where all comments are from Claude.
@@ -361,9 +367,10 @@ mod tests {
     fn parse_ready_command() {
         let cli = Cli::parse_from(["pr-loop", "ready"]);
         match cli.command {
-            Some(Command::Ready { preserve_claude_threads, reviewer }) => {
+            Some(Command::Ready { preserve_claude_threads, reviewer, multiple_commits_ok }) => {
                 assert!(!preserve_claude_threads);
                 assert!(reviewer.is_empty());
+                assert!(!multiple_commits_ok);
             }
             _ => panic!("Expected Ready command"),
         }
@@ -375,9 +382,10 @@ mod tests {
         assert_eq!(cli.repo, Some("owner/repo".to_string()));
         assert_eq!(cli.pr, Some(123));
         match cli.command {
-            Some(Command::Ready { preserve_claude_threads, reviewer }) => {
+            Some(Command::Ready { preserve_claude_threads, reviewer, multiple_commits_ok }) => {
                 assert!(!preserve_claude_threads);
                 assert!(reviewer.is_empty());
+                assert!(!multiple_commits_ok);
             }
             _ => panic!("Expected Ready command"),
         }
@@ -415,9 +423,10 @@ mod tests {
     fn parse_ready_command_with_preserve_claude_threads() {
         let cli = Cli::parse_from(["pr-loop", "ready", "--preserve-claude-threads"]);
         match cli.command {
-            Some(Command::Ready { preserve_claude_threads, reviewer }) => {
+            Some(Command::Ready { preserve_claude_threads, reviewer, multiple_commits_ok }) => {
                 assert!(preserve_claude_threads);
                 assert!(reviewer.is_empty());
+                assert!(!multiple_commits_ok);
             }
             _ => panic!("Expected Ready command"),
         }
@@ -507,9 +516,23 @@ mod tests {
     fn parse_ready_command_with_reviewer() {
         let cli = Cli::parse_from(["pr-loop", "ready", "--reviewer", "octocat"]);
         match cli.command {
-            Some(Command::Ready { preserve_claude_threads, reviewer }) => {
+            Some(Command::Ready { preserve_claude_threads, reviewer, multiple_commits_ok }) => {
                 assert!(!preserve_claude_threads);
                 assert_eq!(reviewer, vec!["octocat".to_string()]);
+                assert!(!multiple_commits_ok);
+            }
+            _ => panic!("Expected Ready command"),
+        }
+    }
+
+    #[test]
+    fn parse_ready_command_with_multiple_commits_ok() {
+        let cli = Cli::parse_from(["pr-loop", "ready", "--multiple-commits-ok"]);
+        match cli.command {
+            Some(Command::Ready { preserve_claude_threads, reviewer, multiple_commits_ok }) => {
+                assert!(!preserve_claude_threads);
+                assert!(reviewer.is_empty());
+                assert!(multiple_commits_ok);
             }
             _ => panic!("Expected Ready command"),
         }
