@@ -318,6 +318,30 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 11px;
   }
+  .fixup-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 15px;
+    height: 15px;
+    border-radius: 3px;
+    background: var(--muted);
+    color: var(--bg);
+    font-size: 10px;
+    line-height: 1;
+    vertical-align: middle;
+    margin-right: 4px;
+    flex-shrink: 0;
+    font-style: normal;
+    opacity: 0.75;
+  }
+  .commit .title:hover .fixup-badge { opacity: 1; }
+  .commit .body-line {
+    color: var(--muted);
+    font-size: 12px;
+    margin-top: 2px;
+    font-style: italic;
+  }
   .commit.new {
     background: var(--danger-bg);
     padding-left: 8px;
@@ -1066,12 +1090,17 @@ function Commit({ commit, isNew, onDismiss }) {
   const ago = relativeTime(commit.committed_date);
   const author = commit.author_login || commit.author_name || '';
   const dismiss = () => { if (isNew) onDismiss(commit.sha); };
+  const isFixup = commit.message_headline.startsWith('fixup! ');
+  const title = isFixup ? commit.message_headline.slice('fixup! '.length) : commit.message_headline;
   return html`
     <div class=${'commit' + (isNew ? ' new' : '')}>
       <a class="title" href=${commit.url} target="_blank"
          onClick=${dismiss} onAuxClick=${dismiss}>
-        ${commit.message_headline}
+        ${isFixup && html`<span class="fixup-badge">↩</span>`}${title}
       </a>
+      ${isFixup && commit.message_body_first_line && html`
+        <div class="body-line">${commit.message_body_first_line}</div>
+      `}
       <div class="meta">
         <span class="sha">${commit.abbreviated_sha}</span>${author ? ' · ' + author : ''}${' · '}${ago}
       </div>

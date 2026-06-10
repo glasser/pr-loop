@@ -10,6 +10,7 @@ query FetchCommits($owner: String!, $repo: String!, $pr: Int!, $cursor: String) 
                         oid
                         abbreviatedOid
                         messageHeadline
+                        messageBody
                         committedDate
                         author {
                             name

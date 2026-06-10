@@ -10,6 +10,7 @@ pub struct PrCommit {
     pub sha: String,
     pub abbreviated_sha: String,
     pub message_headline: String,
+    pub message_body: String,
     pub committed_date: String,
     pub author_name: Option<String>,
     pub author_login: Option<String>,
@@ -98,6 +99,8 @@ struct CommitNode {
     abbreviated_oid: String,
     #[serde(rename = "messageHeadline")]
     message_headline: String,
+    #[serde(rename = "messageBody")]
+    message_body: String,
     #[serde(rename = "committedDate")]
     committed_date: String,
     author: Option<AuthorNode>,
@@ -177,6 +180,7 @@ fn fetch_pr_info_from_graphql(owner: &str, repo: &str, pr_number: u64) -> Result
                 sha: n.commit.oid,
                 abbreviated_sha: n.commit.abbreviated_oid,
                 message_headline: n.commit.message_headline,
+                message_body: n.commit.message_body,
                 committed_date: n.commit.committed_date,
                 author_name: n.commit.author.as_ref().and_then(|a| a.name.clone()),
                 author_login: n

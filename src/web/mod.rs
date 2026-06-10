@@ -88,6 +88,8 @@ struct CommitDto {
     sha: String,
     abbreviated_sha: String,
     message_headline: String,
+    /// First non-empty line of the commit body; None if empty.
+    message_body_first_line: Option<String>,
     committed_date: String,
     author_name: Option<String>,
     author_login: Option<String>,
@@ -96,10 +98,16 @@ struct CommitDto {
 
 impl From<&PrCommit> for CommitDto {
     fn from(c: &PrCommit) -> Self {
+        let message_body_first_line = c
+            .message_body
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .map(|l| l.to_string());
         Self {
             sha: c.sha.clone(),
             abbreviated_sha: c.abbreviated_sha.clone(),
             message_headline: c.message_headline.clone(),
+            message_body_first_line,
             committed_date: c.committed_date.clone(),
             author_name: c.author_name.clone(),
             author_login: c.author_login.clone(),
