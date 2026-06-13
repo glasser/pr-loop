@@ -12,10 +12,10 @@ Mark a draft PR as ready for human review. This validates the PR is in a good st
 
 If the user mentioned one or more people's names as reviewers, use GitHub search (e.g., `gh api "search/users?q=FULLNAME+in:name"` or check the repo's contributors via `gh api repos/OWNER/REPO/contributors`) to determine their GitHub usernames. Tell the user who you've resolved the names to (e.g., "I'll request reviews from @alice (Alice Smith) and @bob (Bob Jones)") before proceeding. Then pass `--reviewer <username>` for each reviewer to `pr-loop ready` (e.g., `--reviewer alice --reviewer bob`).
 
-Run `pr-loop ready` (add `--preserve-claude-threads` if user passed "preserve", add `--reviewer <username>` if a reviewer was identified):
+Run `pr-loop ready` (add `--preserve-claude-threads` if user passed "preserve", add `--reviewer <username>` if a reviewer was identified, add `--expected-commits N` if the user specified an expected commit count):
 
 1. Verify the PR is currently in draft mode
-2. Verify the PR has exactly one commit. If not, follow the squash instructions in the output, force-push, then run `pr-loop --wait-until-actionable-or-happy --maintain-status` to wait for CI, and finally run `pr-loop ready` again
+2. Verify the PR has exactly one commit (or `--expected-commits N` commits if specified). If not, follow the squash instructions in the output, force-push, then run `pr-loop --wait-until-actionable-or-happy --maintain-status` to wait for CI, and finally run `pr-loop ready` again
 3. Validate that:
    - All CI checks are passing (no failures or pending)
    - All review threads are resolved (not just responded to)
@@ -88,6 +88,6 @@ Once that exits successfully, run `pr-loop ready` again.
 
 - **If pr-loop is running as a background task**, stop it first before running `pr-loop ready`.
 - The PR must be in draft mode - this command is for transitioning drafts to ready
-- The PR must have exactly one commit - squash your commits before running
+- The PR must have exactly one commit (or the number specified via `--expected-commits`) - squash your commits before running
 - CI must be fully passing (not pending) before marking ready
 - All review threads must be actually resolved (having Claude's response as the last comment is not enough)

@@ -89,11 +89,11 @@ pub enum Command {
         #[arg(long)]
         reviewer: Vec<String>,
 
-        /// Skip the single-commit requirement. By default, `ready` requires the PR to have
-        /// exactly one commit (to encourage a clean squashed history). Use this flag when
-        /// the repo accepts multi-commit PRs.
+        /// Require the PR to have exactly this many commits. By default, `ready` requires
+        /// exactly one commit. Use this when you intentionally craft a multi-commit PR and
+        /// want to verify the expected number of commits before marking ready.
         #[arg(long)]
-        multiple_commits_ok: bool,
+        expected_commits: Option<u64>,
     },
 
     /// Delete resolved review threads where all comments are from Claude.
@@ -367,10 +367,10 @@ mod tests {
     fn parse_ready_command() {
         let cli = Cli::parse_from(["pr-loop", "ready"]);
         match cli.command {
-            Some(Command::Ready { preserve_claude_threads, reviewer, multiple_commits_ok }) => {
+            Some(Command::Ready { preserve_claude_threads, reviewer, expected_commits }) => {
                 assert!(!preserve_claude_threads);
                 assert!(reviewer.is_empty());
-                assert!(!multiple_commits_ok);
+                assert!(expected_commits.is_none());
             }
             _ => panic!("Expected Ready command"),
         }
@@ -382,10 +382,10 @@ mod tests {
         assert_eq!(cli.repo, Some("owner/repo".to_string()));
         assert_eq!(cli.pr, Some(123));
         match cli.command {
-            Some(Command::Ready { preserve_claude_threads, reviewer, multiple_commits_ok }) => {
+            Some(Command::Ready { preserve_claude_threads, reviewer, expected_commits }) => {
                 assert!(!preserve_claude_threads);
                 assert!(reviewer.is_empty());
-                assert!(!multiple_commits_ok);
+                assert!(expected_commits.is_none());
             }
             _ => panic!("Expected Ready command"),
         }
@@ -423,10 +423,10 @@ mod tests {
     fn parse_ready_command_with_preserve_claude_threads() {
         let cli = Cli::parse_from(["pr-loop", "ready", "--preserve-claude-threads"]);
         match cli.command {
-            Some(Command::Ready { preserve_claude_threads, reviewer, multiple_commits_ok }) => {
+            Some(Command::Ready { preserve_claude_threads, reviewer, expected_commits }) => {
                 assert!(preserve_claude_threads);
                 assert!(reviewer.is_empty());
-                assert!(!multiple_commits_ok);
+                assert!(expected_commits.is_none());
             }
             _ => panic!("Expected Ready command"),
         }
@@ -516,23 +516,23 @@ mod tests {
     fn parse_ready_command_with_reviewer() {
         let cli = Cli::parse_from(["pr-loop", "ready", "--reviewer", "octocat"]);
         match cli.command {
-            Some(Command::Ready { preserve_claude_threads, reviewer, multiple_commits_ok }) => {
+            Some(Command::Ready { preserve_claude_threads, reviewer, expected_commits }) => {
                 assert!(!preserve_claude_threads);
                 assert_eq!(reviewer, vec!["octocat".to_string()]);
-                assert!(!multiple_commits_ok);
+                assert!(expected_commits.is_none());
             }
             _ => panic!("Expected Ready command"),
         }
     }
 
     #[test]
-    fn parse_ready_command_with_multiple_commits_ok() {
-        let cli = Cli::parse_from(["pr-loop", "ready", "--multiple-commits-ok"]);
+    fn parse_ready_command_with_expected_commits() {
+        let cli = Cli::parse_from(["pr-loop", "ready", "--expected-commits", "3"]);
         match cli.command {
-            Some(Command::Ready { preserve_claude_threads, reviewer, multiple_commits_ok }) => {
+            Some(Command::Ready { preserve_claude_threads, reviewer, expected_commits }) => {
                 assert!(!preserve_claude_threads);
                 assert!(reviewer.is_empty());
-                assert!(multiple_commits_ok);
+                assert_eq!(expected_commits, Some(3));
             }
             _ => panic!("Expected Ready command"),
         }

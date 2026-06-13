@@ -264,7 +264,7 @@ fn main() {
             }
         }
 
-        Some(Command::Ready { preserve_claude_threads, reviewer, multiple_commits_ok }) => {
+        Some(Command::Ready { preserve_claude_threads, reviewer, expected_commits }) => {
             run_ready_command(
                 &pr_client,
                 &pr_context,
@@ -272,7 +272,7 @@ fn main() {
                 &cli.exclude_checks,
                 preserve_claude_threads,
                 &reviewer,
-                multiple_commits_ok,
+                expected_commits,
             );
         }
 
@@ -1048,7 +1048,7 @@ fn run_ready_command(
     exclude_checks: &[String],
     preserve_claude_threads: bool,
     reviewers: &[String],
-    multiple_commits_ok: bool,
+    expected_commits: Option<u64>,
 ) {
     let checks_client = RealChecksClient;
     let threads_client = RealThreadsClient;
@@ -1069,16 +1069,19 @@ fn run_ready_command(
         }
     }
 
-    // Step 2: Check that PR has exactly one commit (unless --multiple-commits-ok)
-    if multiple_commits_ok {
-        println!("Skipping commit count check (--multiple-commits-ok)");
-    } else {
-        println!("Checking PR commit count...");
-        match pr_client.get_commit_count(&pr_context.owner, &pr_context.repo, pr_context.pr_number) {
-            Ok(1) => {
+    // Step 2: Check commit count
+    let required = expected_commits.unwrap_or(1) as usize;
+    println!("Checking PR commit count...");
+    match pr_client.get_commit_count(&pr_context.owner, &pr_context.repo, pr_context.pr_number) {
+        Ok(count) if count == required => {
+            if required == 1 {
                 println!("✓ PR has a single commit");
+            } else {
+                println!("✓ PR has {} commits (expected {})", count, required);
             }
-            Ok(count) => {
+        }
+        Ok(count) => {
+            if required == 1 {
                 eprintln!("Error: PR has {} commits. Please squash to a single commit before marking ready.", count);
                 eprintln!();
                 eprintln!("First, fetch the latest from origin:");
@@ -1102,13 +1105,18 @@ fn run_ready_command(
                 eprintln!("NOTE: You MUST use --wait-until-actionable-or-happy (not --wait-until-actionable)");
                 eprintln!("so that the command exits successfully when CI passes. Then run `pr-loop ready` again.");
                 eprintln!();
-                eprintln!("If this repo accepts multi-commit PRs, pass --multiple-commits-ok to skip this check.");
-                std::process::exit(1);
+                eprintln!("If this repo accepts multi-commit PRs, pass --expected-commits N to specify the expected count.");
+            } else {
+                eprintln!(
+                    "Error: PR has {} commit(s) but expected {}. Please ensure the PR has exactly {} commits.",
+                    count, required, required
+                );
             }
-            Err(e) => {
-                eprintln!("Error: Failed to check PR commit count: {}", e);
-                std::process::exit(1);
-            }
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("Error: Failed to check PR commit count: {}", e);
+            std::process::exit(1);
         }
     }
 
