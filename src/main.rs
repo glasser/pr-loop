@@ -18,6 +18,7 @@ mod graphql_validation;
 mod pr;
 mod reply;
 mod threads;
+mod view_state;
 mod wait;
 mod web;
 
@@ -28,7 +29,7 @@ use circleci::{
     RealCircleCiClient,
 };
 use clap::Parser;
-use cli::{Cli, Command};
+use cli::{Cli, Command, ViewStateAction};
 use credentials::{CredentialProvider, Credentials, RealCredentialProvider};
 use git::RealGitClient;
 use github::{
@@ -41,6 +42,7 @@ use threads::{
     RealThreadsClient, ReviewThread, ThreadsClient, CLAUDE_MARKER, PAPERCLIP_EMOJI,
     PAPERCLIP_SHORTCODE,
 };
+use view_state::{plan_set, paths_needing_mark_unviewed, paths_needing_mark_viewed, RealViewStateClient, ViewStateClient, ViewStateFile};
 use wait::{capture_snapshot, wait_until_actionable, wait_until_actionable_or_happy, WaitResult};
 
 fn main() {
@@ -287,6 +289,11 @@ fn main() {
                 &cli.include_checks,
                 &cli.exclude_checks,
             );
+        }
+
+        Some(Command::ViewState { action }) => {
+            let view_state_client = RealViewStateClient;
+            run_view_state_command(&view_state_client, &pr_context, action);
         }
 
         Some(Command::Web { port, open, bind }) => {
@@ -1255,4 +1262,199 @@ fn run_ready_command(
 
     println!();
     println!("🎉 PR is now ready for human review!");
+}
+
+/// Run the `view-state` subcommand group.
+fn run_view_state_command(
+    client: &dyn ViewStateClient,
+    pr_context: &PrContext,
+    action: ViewStateAction,
+) {
+    match action {
+        ViewStateAction::Export { file } => run_view_state_export(client, pr_context, &file),
+        ViewStateAction::Set { file } => run_view_state_set(client, pr_context, &file),
+        ViewStateAction::MarkAllViewed => run_view_state_mark_all_viewed(client, pr_context),
+        ViewStateAction::MarkAllUnviewed => run_view_state_mark_all_unviewed(client, pr_context),
+    }
+}
+
+/// `view-state export --file <path>`: dump every file's viewed state to JSON.
+fn run_view_state_export(client: &dyn ViewStateClient, pr_context: &PrContext, file: &std::path::Path) {
+    println!(
+        "Fetching file viewed state for {}/{}#{}...",
+        pr_context.owner, pr_context.repo, pr_context.pr_number
+    );
+
+    let (_pr_id, files) = match client.fetch_pr_files(&pr_context.owner, &pr_context.repo, pr_context.pr_number) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Error: Failed to fetch PR files: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let export = ViewStateFile {
+        owner: pr_context.owner.clone(),
+        repo: pr_context.repo.clone(),
+        pr: pr_context.pr_number,
+        files,
+    };
+
+    let json = match serde_json::to_string_pretty(&export) {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("Error: Failed to serialize view state: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    if let Err(e) = std::fs::write(file, json) {
+        eprintln!("Error: Failed to write {}: {}", file.display(), e);
+        std::process::exit(1);
+    }
+
+    println!(
+        "✓ Exported viewed state for {} file(s) to {}",
+        export.files.len(),
+        file.display()
+    );
+}
+
+/// `view-state set --file <path>`: read a file written by `export` and apply it.
+fn run_view_state_set(client: &dyn ViewStateClient, pr_context: &PrContext, file: &std::path::Path) {
+    let contents = match std::fs::read_to_string(file) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error: Failed to read {}: {}", file.display(), e);
+            std::process::exit(1);
+        }
+    };
+
+    let saved: ViewStateFile = match serde_json::from_str(&contents) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Error: Failed to parse {}: {}", file.display(), e);
+            std::process::exit(1);
+        }
+    };
+
+    if saved.owner != pr_context.owner || saved.repo != pr_context.repo || saved.pr != pr_context.pr_number {
+        eprintln!(
+            "Error: {} was exported from {}/{}#{}, but the current PR is {}/{}#{}.",
+            file.display(),
+            saved.owner,
+            saved.repo,
+            saved.pr,
+            pr_context.owner,
+            pr_context.repo,
+            pr_context.pr_number
+        );
+        eprintln!("Refusing to apply state from a different PR. Pass --repo/--pr to target it explicitly.");
+        std::process::exit(1);
+    }
+
+    println!(
+        "Fetching current file list for {}/{}#{}...",
+        pr_context.owner, pr_context.repo, pr_context.pr_number
+    );
+
+    let (pr_id, current_files) = match client.fetch_pr_files(&pr_context.owner, &pr_context.repo, pr_context.pr_number) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Error: Failed to fetch PR files: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let current_paths: std::collections::HashSet<String> =
+        current_files.into_iter().map(|f| f.path).collect();
+
+    let plan = plan_set(&saved.files, &current_paths);
+
+    if !plan.missing_paths.is_empty() {
+        println!(
+            "Note: {} path(s) from {} no longer exist in this PR (skipped):",
+            plan.missing_paths.len(),
+            file.display()
+        );
+        for p in &plan.missing_paths {
+            println!("  - {}", p);
+        }
+    }
+
+    if let Err(e) = client.mark_viewed(&pr_id, &plan.to_mark_viewed) {
+        eprintln!("Error: Failed to mark files as viewed: {}", e);
+        std::process::exit(1);
+    }
+    if let Err(e) = client.mark_unviewed(&pr_id, &plan.to_mark_unviewed) {
+        eprintln!("Error: Failed to mark files as unviewed: {}", e);
+        std::process::exit(1);
+    }
+
+    println!(
+        "✓ Applied viewed state: {} marked viewed, {} marked unviewed",
+        plan.to_mark_viewed.len(),
+        plan.to_mark_unviewed.len()
+    );
+}
+
+/// `view-state mark-all-viewed`: mark every file in the PR as viewed.
+fn run_view_state_mark_all_viewed(client: &dyn ViewStateClient, pr_context: &PrContext) {
+    println!(
+        "Fetching file list for {}/{}#{}...",
+        pr_context.owner, pr_context.repo, pr_context.pr_number
+    );
+
+    let (pr_id, files) = match client.fetch_pr_files(&pr_context.owner, &pr_context.repo, pr_context.pr_number) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Error: Failed to fetch PR files: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let paths = paths_needing_mark_viewed(&files);
+    if paths.is_empty() {
+        println!("✓ All {} file(s) already marked viewed", files.len());
+        return;
+    }
+
+    println!("Marking {} of {} file(s) as viewed...", paths.len(), files.len());
+    match client.mark_viewed(&pr_id, &paths) {
+        Ok(()) => println!("✓ Marked {} file(s) as viewed", paths.len()),
+        Err(e) => {
+            eprintln!("Error: Failed to mark files as viewed: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `view-state mark-all-unviewed`: mark every file in the PR as unviewed.
+fn run_view_state_mark_all_unviewed(client: &dyn ViewStateClient, pr_context: &PrContext) {
+    println!(
+        "Fetching file list for {}/{}#{}...",
+        pr_context.owner, pr_context.repo, pr_context.pr_number
+    );
+
+    let (pr_id, files) = match client.fetch_pr_files(&pr_context.owner, &pr_context.repo, pr_context.pr_number) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Error: Failed to fetch PR files: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let paths = paths_needing_mark_unviewed(&files);
+    if paths.is_empty() {
+        println!("✓ All {} file(s) already marked unviewed", files.len());
+        return;
+    }
+
+    println!("Marking {} of {} file(s) as unviewed...", paths.len(), files.len());
+    match client.mark_unviewed(&pr_id, &paths) {
+        Ok(()) => println!("✓ Marked {} file(s) as unviewed", paths.len()),
+        Err(e) => {
+            eprintln!("Error: Failed to mark files as unviewed: {}", e);
+            std::process::exit(1);
+        }
+    }
 }

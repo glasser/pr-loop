@@ -2,6 +2,7 @@
 // Defines the command-line interface for pr-loop.
 
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(name = "pr-loop")]
@@ -161,6 +162,40 @@ pub enum Command {
     /// and the resulting activity. Useful for debugging why the web UI isn't
     /// showing the expected state.
     CcStatus,
+
+    /// Manage the per-viewer "Viewed" checkboxes on the PR's Files Changed tab.
+    ViewState {
+        #[command(subcommand)]
+        action: ViewStateAction,
+    },
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum ViewStateAction {
+    /// Export the current viewed/unviewed/dismissed state of every file in
+    /// the PR to a JSON file. Useful to snapshot before a bulk "mark all" so
+    /// you can restore it afterward with `set`.
+    Export {
+        /// Path to write the exported state to.
+        #[arg(long)]
+        file: PathBuf,
+    },
+
+    /// Read a file written by `export` and apply its viewed state to the PR.
+    /// Refuses to run if the file was exported from a different repo/PR.
+    /// Paths that no longer exist in the current PR are skipped and reported,
+    /// not treated as an error.
+    Set {
+        /// Path to a previously exported state file.
+        #[arg(long)]
+        file: PathBuf,
+    },
+
+    /// Mark every file in the PR as viewed.
+    MarkAllViewed,
+
+    /// Mark every file in the PR as unviewed.
+    MarkAllUnviewed,
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -523,6 +558,59 @@ mod tests {
             }
             _ => panic!("Expected Ready command"),
         }
+    }
+
+    #[test]
+    fn parse_view_state_export() {
+        let cli = Cli::parse_from(["pr-loop", "view-state", "export", "--file", "state.json"]);
+        match cli.command {
+            Some(Command::ViewState { action: ViewStateAction::Export { file } }) => {
+                assert_eq!(file, PathBuf::from("state.json"));
+            }
+            _ => panic!("Expected ViewState Export command"),
+        }
+    }
+
+    #[test]
+    fn parse_view_state_set() {
+        let cli = Cli::parse_from(["pr-loop", "view-state", "set", "--file", "state.json"]);
+        match cli.command {
+            Some(Command::ViewState { action: ViewStateAction::Set { file } }) => {
+                assert_eq!(file, PathBuf::from("state.json"));
+            }
+            _ => panic!("Expected ViewState Set command"),
+        }
+    }
+
+    #[test]
+    fn parse_view_state_mark_all_viewed() {
+        let cli = Cli::parse_from(["pr-loop", "view-state", "mark-all-viewed"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::ViewState { action: ViewStateAction::MarkAllViewed })
+        ));
+    }
+
+    #[test]
+    fn parse_view_state_mark_all_unviewed() {
+        let cli = Cli::parse_from(["pr-loop", "view-state", "mark-all-unviewed"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::ViewState { action: ViewStateAction::MarkAllUnviewed })
+        ));
+    }
+
+    #[test]
+    fn parse_view_state_with_global_args() {
+        let cli = Cli::parse_from([
+            "pr-loop", "--repo", "owner/repo", "--pr", "123", "view-state", "mark-all-viewed",
+        ]);
+        assert_eq!(cli.repo, Some("owner/repo".to_string()));
+        assert_eq!(cli.pr, Some(123));
+        assert!(matches!(
+            cli.command,
+            Some(Command::ViewState { action: ViewStateAction::MarkAllViewed })
+        ));
     }
 
     #[test]

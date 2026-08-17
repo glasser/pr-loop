@@ -1,0 +1,17 @@
+query FetchPrFiles($owner: String!, $repo: String!, $pr: Int!, $cursor: String) {
+    repository(owner: $owner, name: $repo) {
+        pullRequest(number: $pr) {
+            id
+            files(first: 100, after: $cursor) {
+                pageInfo {
+                    hasNextPage
+                    endCursor
+                }
+                nodes {
+                    path
+                    viewerViewedState
+                }
+            }
+        }
+    }
+}
