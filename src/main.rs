@@ -42,7 +42,10 @@ use threads::{
     RealThreadsClient, ReviewThread, ThreadsClient, CLAUDE_MARKER, PAPERCLIP_EMOJI,
     PAPERCLIP_SHORTCODE,
 };
-use view_state::{plan_set, paths_needing_mark_unviewed, paths_needing_mark_viewed, RealViewStateClient, ViewStateClient, ViewStateFile};
+use view_state::{
+    filter_by_extensions, plan_set, paths_needing_mark_unviewed, paths_needing_mark_viewed,
+    RealViewStateClient, ViewStateClient, ViewStateFile,
+};
 use wait::{capture_snapshot, wait_until_actionable, wait_until_actionable_or_happy, WaitResult};
 
 fn main() {
@@ -1273,8 +1276,12 @@ fn run_view_state_command(
     match action {
         ViewStateAction::Export { file } => run_view_state_export(client, pr_context, &file),
         ViewStateAction::Set { file } => run_view_state_set(client, pr_context, &file),
-        ViewStateAction::MarkAllViewed => run_view_state_mark_all_viewed(client, pr_context),
-        ViewStateAction::MarkAllUnviewed => run_view_state_mark_all_unviewed(client, pr_context),
+        ViewStateAction::MarkAllViewed { extension } => {
+            run_view_state_mark_all_viewed(client, pr_context, &extension)
+        }
+        ViewStateAction::MarkAllUnviewed { extension } => {
+            run_view_state_mark_all_unviewed(client, pr_context, &extension)
+        }
     }
 }
 
@@ -1397,8 +1404,9 @@ fn run_view_state_set(client: &dyn ViewStateClient, pr_context: &PrContext, file
     );
 }
 
-/// `view-state mark-all-viewed`: mark every file in the PR as viewed.
-fn run_view_state_mark_all_viewed(client: &dyn ViewStateClient, pr_context: &PrContext) {
+/// `view-state mark-all-viewed`: mark every file in the PR (optionally
+/// restricted to `extensions`) as viewed.
+fn run_view_state_mark_all_viewed(client: &dyn ViewStateClient, pr_context: &PrContext, extensions: &[String]) {
     println!(
         "Fetching file list for {}/{}#{}...",
         pr_context.owner, pr_context.repo, pr_context.pr_number
@@ -1412,13 +1420,22 @@ fn run_view_state_mark_all_viewed(client: &dyn ViewStateClient, pr_context: &PrC
         }
     };
 
-    let paths = paths_needing_mark_viewed(&files);
+    let scoped = filter_by_extensions(&files, extensions);
+    if let Some(suffix) = extension_filter_suffix(extensions) {
+        if scoped.is_empty() {
+            println!("No files match {} out of {} total", suffix, files.len());
+            return;
+        }
+        println!("{} of {} file(s) match {}", scoped.len(), files.len(), suffix);
+    }
+
+    let paths = paths_needing_mark_viewed(&scoped);
     if paths.is_empty() {
-        println!("✓ All {} file(s) already marked viewed", files.len());
+        println!("✓ All {} file(s) already marked viewed", scoped.len());
         return;
     }
 
-    println!("Marking {} of {} file(s) as viewed...", paths.len(), files.len());
+    println!("Marking {} of {} file(s) as viewed...", paths.len(), scoped.len());
     match client.mark_viewed(&pr_id, &paths) {
         Ok(()) => println!("✓ Marked {} file(s) as viewed", paths.len()),
         Err(e) => {
@@ -1428,8 +1445,9 @@ fn run_view_state_mark_all_viewed(client: &dyn ViewStateClient, pr_context: &PrC
     }
 }
 
-/// `view-state mark-all-unviewed`: mark every file in the PR as unviewed.
-fn run_view_state_mark_all_unviewed(client: &dyn ViewStateClient, pr_context: &PrContext) {
+/// `view-state mark-all-unviewed`: mark every file in the PR (optionally
+/// restricted to `extensions`) as unviewed.
+fn run_view_state_mark_all_unviewed(client: &dyn ViewStateClient, pr_context: &PrContext, extensions: &[String]) {
     println!(
         "Fetching file list for {}/{}#{}...",
         pr_context.owner, pr_context.repo, pr_context.pr_number
@@ -1443,13 +1461,22 @@ fn run_view_state_mark_all_unviewed(client: &dyn ViewStateClient, pr_context: &P
         }
     };
 
-    let paths = paths_needing_mark_unviewed(&files);
+    let scoped = filter_by_extensions(&files, extensions);
+    if let Some(suffix) = extension_filter_suffix(extensions) {
+        if scoped.is_empty() {
+            println!("No files match {} out of {} total", suffix, files.len());
+            return;
+        }
+        println!("{} of {} file(s) match {}", scoped.len(), files.len(), suffix);
+    }
+
+    let paths = paths_needing_mark_unviewed(&scoped);
     if paths.is_empty() {
-        println!("✓ All {} file(s) already marked unviewed", files.len());
+        println!("✓ All {} file(s) already marked unviewed", scoped.len());
         return;
     }
 
-    println!("Marking {} of {} file(s) as unviewed...", paths.len(), files.len());
+    println!("Marking {} of {} file(s) as unviewed...", paths.len(), scoped.len());
     match client.mark_unviewed(&pr_id, &paths) {
         Ok(()) => println!("✓ Marked {} file(s) as unviewed", paths.len()),
         Err(e) => {
@@ -1457,4 +1484,13 @@ fn run_view_state_mark_all_unviewed(client: &dyn ViewStateClient, pr_context: &P
             std::process::exit(1);
         }
     }
+}
+
+/// Human-readable description of an `--extension` filter for status messages,
+/// or `None` when no filter was given.
+fn extension_filter_suffix(extensions: &[String]) -> Option<String> {
+    if extensions.is_empty() {
+        return None;
+    }
+    Some(format!("extension(s): {}", extensions.join(", ")))
 }

@@ -133,6 +133,39 @@ pub fn paths_needing_mark_unviewed(files: &[PrFileState]) -> Vec<String> {
         .collect()
 }
 
+/// The file extension GitHub's own "Files changed" extension filter would use
+/// for `path` (the substring after the last `.` in the file name), or `None`
+/// for an extensionless file like `Dockerfile`.
+fn file_extension(path: &str) -> Option<&str> {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+}
+
+/// Restrict `files` to those whose extension is in `extensions` (matched
+/// case-insensitively; a leading `.` on either side is ignored). An empty
+/// `extensions` list means "no filter" — every file is kept, matching
+/// `mark-all-*`'s default behavior when `--extension` isn't passed.
+pub fn filter_by_extensions(files: &[PrFileState], extensions: &[String]) -> Vec<PrFileState> {
+    if extensions.is_empty() {
+        return files.to_vec();
+    }
+
+    let wanted: HashSet<String> = extensions
+        .iter()
+        .map(|e| e.trim_start_matches('.').to_lowercase())
+        .collect();
+
+    files
+        .iter()
+        .filter(|f| {
+            file_extension(&f.path)
+                .is_some_and(|ext| wanted.contains(&ext.to_lowercase()))
+        })
+        .cloned()
+        .collect()
+}
+
 // GraphQL response structures for fetching PR files.
 #[derive(Deserialize)]
 struct GraphQLResponse<T> {
@@ -506,6 +539,80 @@ mod tests {
             file("b.rs", FileViewedState::Unviewed),
         ];
         assert!(paths_needing_mark_unviewed(&files).is_empty());
+    }
+
+    // --- filter_by_extensions ---
+
+    #[test]
+    fn filter_by_extensions_empty_filter_keeps_everything() {
+        let files = vec![
+            file("a.rs", FileViewedState::Viewed),
+            file("b.yaml", FileViewedState::Unviewed),
+        ];
+        let filtered = filter_by_extensions(&files, &[]);
+        assert_eq!(filtered, files);
+    }
+
+    #[test]
+    fn filter_by_extensions_single_extension() {
+        let files = vec![
+            file("a.rs", FileViewedState::Viewed),
+            file("b.yaml", FileViewedState::Unviewed),
+            file("dir/c.yaml", FileViewedState::Dismissed),
+        ];
+        let filtered = filter_by_extensions(&files, &["yaml".to_string()]);
+        assert_eq!(
+            filtered.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+            vec!["b.yaml", "dir/c.yaml"]
+        );
+    }
+
+    #[test]
+    fn filter_by_extensions_multiple_extensions_are_or() {
+        let files = vec![
+            file("a.yaml", FileViewedState::Viewed),
+            file("b.yml", FileViewedState::Viewed),
+            file("c.rs", FileViewedState::Viewed),
+        ];
+        let filtered = filter_by_extensions(
+            &files,
+            &["yaml".to_string(), "yml".to_string()],
+        );
+        assert_eq!(
+            filtered.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+            vec!["a.yaml", "b.yml"]
+        );
+    }
+
+    #[test]
+    fn filter_by_extensions_ignores_leading_dot_and_case() {
+        let files = vec![file("a.YAML", FileViewedState::Viewed)];
+        let filtered = filter_by_extensions(&files, &[".yaml".to_string()]);
+        assert_eq!(filtered.len(), 1);
+    }
+
+    #[test]
+    fn filter_by_extensions_excludes_extensionless_files() {
+        let files = vec![
+            file("Dockerfile", FileViewedState::Viewed),
+            file("a.yaml", FileViewedState::Viewed),
+        ];
+        let filtered = filter_by_extensions(&files, &["yaml".to_string()]);
+        assert_eq!(filtered.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), vec!["a.yaml"]);
+    }
+
+    #[test]
+    fn filter_by_extensions_no_matches() {
+        let files = vec![file("a.rs", FileViewedState::Viewed)];
+        let filtered = filter_by_extensions(&files, &["yaml".to_string()]);
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn filter_by_extensions_uses_last_dot_segment() {
+        let files = vec![file("foo.test.yaml", FileViewedState::Viewed)];
+        assert_eq!(filter_by_extensions(&files, &["yaml".to_string()]).len(), 1);
+        assert!(filter_by_extensions(&files, &["test".to_string()]).is_empty());
     }
 
     // --- batch mutation query building ---

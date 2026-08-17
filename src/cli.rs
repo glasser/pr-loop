@@ -192,10 +192,22 @@ pub enum ViewStateAction {
     },
 
     /// Mark every file in the PR as viewed.
-    MarkAllViewed,
+    MarkAllViewed {
+        /// Only affect files with this extension (e.g. `yaml`). Can be
+        /// repeated to match multiple extensions, mirroring the extension
+        /// filter in the GitHub PR "Files changed" tab.
+        #[arg(long = "extension")]
+        extension: Vec<String>,
+    },
 
     /// Mark every file in the PR as unviewed.
-    MarkAllUnviewed,
+    MarkAllUnviewed {
+        /// Only affect files with this extension (e.g. `yaml`). Can be
+        /// repeated to match multiple extensions, mirroring the extension
+        /// filter in the GitHub PR "Files changed" tab.
+        #[arg(long = "extension")]
+        extension: Vec<String>,
+    },
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -585,19 +597,49 @@ mod tests {
     #[test]
     fn parse_view_state_mark_all_viewed() {
         let cli = Cli::parse_from(["pr-loop", "view-state", "mark-all-viewed"]);
-        assert!(matches!(
-            cli.command,
-            Some(Command::ViewState { action: ViewStateAction::MarkAllViewed })
-        ));
+        match cli.command {
+            Some(Command::ViewState { action: ViewStateAction::MarkAllViewed { extension } }) => {
+                assert!(extension.is_empty());
+            }
+            _ => panic!("Expected ViewState MarkAllViewed command"),
+        }
+    }
+
+    #[test]
+    fn parse_view_state_mark_all_viewed_with_extension() {
+        let cli = Cli::parse_from([
+            "pr-loop", "view-state", "mark-all-viewed", "--extension", "yaml", "--extension", "yml",
+        ]);
+        match cli.command {
+            Some(Command::ViewState { action: ViewStateAction::MarkAllViewed { extension } }) => {
+                assert_eq!(extension, vec!["yaml".to_string(), "yml".to_string()]);
+            }
+            _ => panic!("Expected ViewState MarkAllViewed command"),
+        }
     }
 
     #[test]
     fn parse_view_state_mark_all_unviewed() {
         let cli = Cli::parse_from(["pr-loop", "view-state", "mark-all-unviewed"]);
-        assert!(matches!(
-            cli.command,
-            Some(Command::ViewState { action: ViewStateAction::MarkAllUnviewed })
-        ));
+        match cli.command {
+            Some(Command::ViewState { action: ViewStateAction::MarkAllUnviewed { extension } }) => {
+                assert!(extension.is_empty());
+            }
+            _ => panic!("Expected ViewState MarkAllUnviewed command"),
+        }
+    }
+
+    #[test]
+    fn parse_view_state_mark_all_unviewed_with_extension() {
+        let cli = Cli::parse_from([
+            "pr-loop", "view-state", "mark-all-unviewed", "--extension", "yaml",
+        ]);
+        match cli.command {
+            Some(Command::ViewState { action: ViewStateAction::MarkAllUnviewed { extension } }) => {
+                assert_eq!(extension, vec!["yaml".to_string()]);
+            }
+            _ => panic!("Expected ViewState MarkAllUnviewed command"),
+        }
     }
 
     #[test]
@@ -609,7 +651,7 @@ mod tests {
         assert_eq!(cli.pr, Some(123));
         assert!(matches!(
             cli.command,
-            Some(Command::ViewState { action: ViewStateAction::MarkAllViewed })
+            Some(Command::ViewState { action: ViewStateAction::MarkAllViewed { .. } })
         ));
     }
 
