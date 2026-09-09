@@ -15,16 +15,7 @@ pub const DEFAULT_BIND: &str = "127.0.0.1";
 #[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
-    pub web: WebConfig,
-    #[serde(default)]
     pub hub: HubConfig,
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct WebConfig {
-    /// Addresses to bind on. None means use the default (127.0.0.1 only).
-    pub bind: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
@@ -42,10 +33,6 @@ impl Config {
     /// Port the hub should bind on (after applying defaults).
     pub fn hub_port(&self) -> u16 {
         self.hub.port.unwrap_or(DEFAULT_HUB_PORT)
-    }
-    /// Addresses a `pr-loop web` instance should bind on.
-    pub fn web_binds(&self) -> Vec<String> {
-        bind_or_default(self.web.bind.as_ref())
     }
 }
 
@@ -107,7 +94,6 @@ mod tests {
     fn default_binds() {
         let c = Config::default();
         assert_eq!(c.hub_binds(), vec!["127.0.0.1".to_string()]);
-        assert_eq!(c.web_binds(), vec!["127.0.0.1".to_string()]);
         assert_eq!(c.hub_port(), DEFAULT_HUB_PORT);
     }
 
@@ -124,20 +110,6 @@ port = 12345
             vec!["127.0.0.1".to_string(), "100.64.1.2".to_string()]
         );
         assert_eq!(c.hub_port(), 12345);
-        // web section absent => default
-        assert_eq!(c.web_binds(), vec!["127.0.0.1".to_string()]);
-    }
-
-    #[test]
-    fn parses_web_section_only() {
-        let c = parse(
-            r#"[web]
-bind = ["0.0.0.0"]
-"#,
-        );
-        assert_eq!(c.web_binds(), vec!["0.0.0.0".to_string()]);
-        assert_eq!(c.hub_binds(), vec!["127.0.0.1".to_string()]);
-        assert_eq!(c.hub_port(), DEFAULT_HUB_PORT);
     }
 
     #[test]

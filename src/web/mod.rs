@@ -1,23 +1,31 @@
-// Local HTTP server for `pr-loop web`. Shows unresolved review threads + PR
-// commits in a browser with live updates.
+// Per-PR "tracker" logic used by `pr-loop hub`. Each tracked PR gets a
+// `Shared` + background poll thread (spawned by `spawn_tracker`, owned by the
+// hub's tracker map) that mirrors what a dedicated `pr-loop web` process used
+// to do on its own — except now `pr-loop hub` is the only long-running
+// process, and it multiplexes many PRs in one server.
+//
+// A PR becomes tracked when the hub receives a `POST /api/register` (sent by
+// any `pr-loop` invocation right after it resolves its PR context) naming
+// that PR's owner/repo/number and the checkout path it was run from. The hub
+// prunes trackers that haven't been re-registered recently — see
+// `hub::FRESHNESS_WINDOW`.
 
 use crate::cc_status::{read_cc_status, CcStatus};
 use crate::checks::{Check, CheckStatus, ChecksClient, RealChecksClient};
 use crate::commits::{CommitsClient, PrCommit, RealCommitsClient};
-use crate::threads::CLAUDE_MARKER;
 use crate::git::{GitClient, RealGitClient};
 use crate::github::PrContext;
 use crate::reply::{RealReplyClient, ReplyClient};
+use crate::threads::CLAUDE_MARKER;
 use crate::threads::{RealThreadsClient, ReviewThread, ThreadComment, ThreadsClient};
 use anyhow::{Context, Result};
 use serde::Serialize;
-use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tiny_http::{Header, Method, Response, Server};
+use tiny_http::{Header, Method, Response};
 
 const INDEX_HTML: &str = include_str!("index.html");
 
@@ -159,20 +167,29 @@ struct StateResponse<'a> {
     #[serde(flatten)]
     state: &'a State,
     cc_status: Option<CcStatus>,
-    /// True when the `pr-loop` binary on disk has been rebuilt since this
+    /// True when the `pr-loop` binary on disk has been rebuilt since the hub
     /// process started. The UI surfaces a "restart" pill when this flips.
     update_available: bool,
 }
 
-struct Shared {
-    pr_context: PrContext,
+/// Per-PR tracker state, owned by the hub's tracker map. One of these exists
+/// for as long as the hub considers the PR "recently active" (see
+/// `hub::FRESHNESS_WINDOW`); the hub tears it down (via `request_stop`) once
+/// it goes stale.
+pub struct Shared {
+    pub pr_context: PrContext,
     state: Mutex<State>,
-    peers: Mutex<Vec<PeerSummary>>,
     // Condvar-paired flag so handlers can poke the poller.
     trigger: (Mutex<bool>, Condvar),
-    /// Flips to true when our binary's mtime changes. Never flips back —
-    /// the UI's restart action is the only way to "reset" it (via exec).
-    update_available: AtomicBool,
+    /// The checkout directory the most recent `pr-loop` invocation for this
+    /// PR ran from. Used for cc_status lookup and the local git-ref-change
+    /// fast path — both inherently path-scoped, not tied to the hub's own
+    /// cwd. Refreshed on every `/api/register` ping.
+    pub checkout_path: Mutex<PathBuf>,
+    /// Last time `/api/register` refreshed this tracker. The hub's reaper
+    /// uses this to decide when to tear the tracker down.
+    pub last_seen: Mutex<Instant>,
+    stop: AtomicBool,
 }
 
 impl Shared {
@@ -191,41 +208,28 @@ impl Shared {
         *guard = false;
         was_poked
     }
+
+    /// Tell this tracker's poll thread to exit at its next check (within
+    /// `GIT_CHECK_INTERVAL`). Called by the hub's reaper when the tracker
+    /// goes stale.
+    pub fn request_stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
 }
 
-pub fn run(
-    pr_context: &PrContext,
-    binds: &[String],
-    port: Option<u16>,
-    open_browser: bool,
-) -> Result<()> {
-    // Bind the first address first so we know the port number (kernel-picked
-    // when port is None). Subsequent binds reuse that port so all interfaces
-    // serve on the same port — this is what lets peer discovery still work
-    // with a single port-file entry.
-    let bind_list: Vec<String> = if binds.is_empty() {
-        vec!["127.0.0.1".to_string()]
-    } else {
-        binds.to_vec()
-    };
+/// Extra per-request context the hub supplies that isn't specific to any one
+/// tracker: whether a binary rebuild was detected (hub-wide), and the list of
+/// other currently-tracked PRs (for the in-page "N other pr-loops" widget).
+pub struct RequestContext<'a> {
+    pub update_available: bool,
+    pub peers: &'a [PeerInfo],
+}
 
-    let first_addr = parse_socket_addr(&bind_list[0], port.unwrap_or(0))?;
-    let first_listener =
-        TcpListener::bind(first_addr).with_context(|| format!("bind {}", first_addr))?;
-    let bound_port = first_listener.local_addr()?.port();
-    let mut listeners = vec![(bind_list[0].clone(), first_listener)];
-    for bind in &bind_list[1..] {
-        let addr = parse_socket_addr(bind, bound_port)?;
-        let l = TcpListener::bind(addr).with_context(|| format!("bind {}", addr))?;
-        listeners.push((bind.clone(), l));
-    }
-
-    // Port file records the port only (we assume 127.0.0.1 is reachable on
-    // the same machine — peer discovery always talks via loopback).
-    let port_file = write_port_file(pr_context, bound_port)?;
-
+/// Create a tracker for `pr_context` and spawn its background poll thread.
+/// Returns the shared handle for the hub to store in its tracker map and
+/// route requests into.
+pub fn spawn_tracker(pr_context: PrContext, checkout_path: PathBuf) -> Arc<Shared> {
     let shared = Arc::new(Shared {
-        pr_context: pr_context.clone(),
         state: Mutex::new(State {
             pr: Some(PrDto {
                 owner: pr_context.owner.clone(),
@@ -236,104 +240,81 @@ pub fn run(
             }),
             ..Default::default()
         }),
-        peers: Mutex::new(vec![]),
         trigger: (Mutex::new(false), Condvar::new()),
-        update_available: AtomicBool::new(false),
+        checkout_path: Mutex::new(checkout_path),
+        last_seen: Mutex::new(Instant::now()),
+        stop: AtomicBool::new(false),
+        pr_context,
     });
 
-    // Watch our own binary for rebuilds. Canonicalize so we follow symlinks
-    // (e.g., ~/.dotfiles/bin/pr-loop → target/release/pr-loop) and watch
-    // the file `cargo build` actually rewrites. Best-effort — if any of
-    // this fails we just skip the thread.
-    if let Some((exe, mtime)) = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.canonicalize().ok())
-        .and_then(|p| std::fs::metadata(&p).and_then(|m| m.modified()).ok().map(|m| (p, m)))
-    {
-        eprintln!("pr-loop web: watching binary for rebuilds at {}", exe.display());
-        let shared_watch = Arc::clone(&shared);
-        thread::spawn(move || watch_binary_mtime(exe, mtime, shared_watch));
-    } else {
-        eprintln!("pr-loop web: could not resolve binary path — restart detection disabled");
-    }
-
-    // Poller thread for our own PR state
-    let pr_clone = pr_context.clone();
     let shared_poll = Arc::clone(&shared);
-    thread::spawn(move || poll_loop(pr_clone, shared_poll));
+    thread::spawn(move || poll_loop(shared_poll));
 
-    // Poller thread for peer pr-loop web instances
-    let shared_peers = Arc::clone(&shared);
-    thread::spawn(move || peers_poll_loop(bound_port, shared_peers));
+    shared
+}
 
-    // Periodically re-write our own port file so if anything deletes it
-    // (the hub's stale-file cleanup after a transient unreachable, etc.)
-    // we re-register within a few seconds.
-    let pr_for_port = pr_context.clone();
-    thread::spawn(move || loop {
-        thread::sleep(Duration::from_secs(5));
-        let _ = write_port_file(&pr_for_port, bound_port);
-    });
+/// Summary of a tracked PR for the hub's chooser page and the in-page
+/// "N other pr-loops" widget. Computed directly from a tracker's cached
+/// state — no network round-trip needed since the hub holds every tracker
+/// in-process.
+#[derive(Clone, Serialize, Default)]
+pub struct PeerInfo {
+    pub pr_owner: String,
+    pub pr_repo: String,
+    pub pr_number: u64,
+    pub pr_title: Option<String>,
+    pub unresolved_threads: u32,
+    pub needs_response: u32,
+}
 
-    // Spin up one HTTP server per bind address, all dispatching to the same
-    // handler through the shared Arc.
-    let mut handles = Vec::new();
-    let primary_url = format!("http://{}:{}/", bind_list[0], bound_port);
-    for (bind, listener) in listeners {
-        let server = Server::from_listener(listener, None)
-            .map_err(|e| anyhow::anyhow!("Failed to create HTTP server on {}: {}", bind, e))?;
-        eprintln!("pr-loop web: listening on http://{}:{}/", bind, bound_port);
-        let shared = Arc::clone(&shared);
-        handles.push(thread::spawn(move || {
-            for request in server.incoming_requests() {
-                if let Err(e) = handle_request(request, &shared) {
-                    eprintln!("web: request error: {}", e);
-                }
+/// Build a `PeerInfo` snapshot for one tracker.
+pub fn peer_info(shared: &Shared) -> PeerInfo {
+    let state = shared.state.lock().unwrap();
+    let mut unresolved_threads = 0u32;
+    let mut needs_response = 0u32;
+    for t in &state.threads {
+        if t.is_resolved || t.is_paperclip {
+            continue;
+        }
+        unresolved_threads += 1;
+        if let Some(last) = t.comments.last() {
+            if !last.body.starts_with(CLAUDE_MARKER) {
+                needs_response += 1;
             }
-        }));
-    }
-
-    eprintln!("PR: {}/{}#{}", pr_context.owner, pr_context.repo, pr_context.pr_number);
-    if open_browser {
-        if let Err(e) = open::that(&primary_url) {
-            eprintln!("Warning: Failed to open browser: {}. Open the URL manually.", e);
         }
     }
-
-    let _ = ctrlc_cleanup(port_file.clone());
-
-    // Wait for all listener threads (they won't exit on their own, but
-    // joining avoids early exit if somehow they all close).
-    for h in handles {
-        let _ = h.join();
+    PeerInfo {
+        pr_owner: shared.pr_context.owner.clone(),
+        pr_repo: shared.pr_context.repo.clone(),
+        pr_number: shared.pr_context.pr_number,
+        pr_title: state.pr.as_ref().and_then(|p| p.title.clone()),
+        unresolved_threads,
+        needs_response,
     }
-
-    let _ = std::fs::remove_file(&port_file);
-    Ok(())
 }
 
-fn parse_socket_addr(host: &str, port: u16) -> Result<SocketAddr> {
-    let s = format!("{}:{}", host, port);
-    s.parse::<SocketAddr>()
-        .with_context(|| format!("parse bind address {}", s))
-}
-
-fn handle_request(mut request: tiny_http::Request, shared: &Arc<Shared>) -> Result<()> {
+/// Handle one HTTP request routed to this tracker. `path` is the request
+/// path *within* the PR's namespace (e.g. `/api/state`), already stripped of
+/// the hub's `/pr/<owner>/<repo>/<pr>` prefix.
+pub fn handle_request(
+    mut request: tiny_http::Request,
+    path: &str,
+    shared: &Arc<Shared>,
+    ctx: &RequestContext,
+) -> Result<()> {
     let pr_context = &shared.pr_context;
     let method = request.method().clone();
-    let url = request.url().to_string();
-    let path = url.split('?').next().unwrap_or(&url).to_string();
 
-    let resp = match (&method, path.as_str()) {
+    let resp = match (&method, path) {
         (&Method::Get, "/") => build_response(INDEX_HTML.to_string(), "text/html; charset=utf-8", 200),
         (&Method::Get, "/api/state") => {
             let state = shared.state.lock().unwrap().clone();
-            let cwd = std::env::current_dir().ok();
-            let cc_status = cwd.as_deref().and_then(read_cc_status);
+            let checkout_path = shared.checkout_path.lock().unwrap().clone();
+            let cc_status = read_cc_status(&checkout_path);
             let response = StateResponse {
                 state: &state,
                 cc_status,
-                update_available: shared.update_available.load(Ordering::Relaxed),
+                update_available: ctx.update_available,
             };
             let body = serde_json::to_string(&response)?;
             build_response(body, "application/json", 200)
@@ -358,8 +339,7 @@ fn handle_request(mut request: tiny_http::Request, shared: &Arc<Shared>) -> Resu
             }
         }
         (&Method::Get, "/api/peers") => {
-            let peers = shared.peers.lock().unwrap().clone();
-            let body = serde_json::to_string(&peers)?;
+            let body = serde_json::to_string(ctx.peers)?;
             build_response(body, "application/json", 200)
         }
         (&Method::Post, p) if p.starts_with("/api/threads/") && p.ends_with("/resolve") => {
@@ -454,18 +434,7 @@ fn decode_thread_id(raw: &str) -> String {
         .unwrap_or_else(|_| raw.to_string())
 }
 
-/// Background loop that refreshes the list of other pr-loop web instances
-/// by reading their port files and calling their /api/state. Runs at a more
-/// relaxed cadence than the main GH poller.
-fn peers_poll_loop(own_port: u16, shared: Arc<Shared>) {
-    loop {
-        let peers = fetch_all_peers(own_port);
-        *shared.peers.lock().unwrap() = peers;
-        thread::sleep(Duration::from_secs(5));
-    }
-}
-
-fn poll_loop(pr_context: PrContext, shared: Arc<Shared>) {
+fn poll_loop(shared: Arc<Shared>) {
     let threads_client = RealThreadsClient;
     let commits_client = RealCommitsClient;
     let git = RealGitClient;
@@ -474,8 +443,13 @@ fn poll_loop(pr_context: PrContext, shared: Arc<Shared>) {
     let mut last_fetch = Instant::now() - POLL_INTERVAL; // force immediate fetch
 
     loop {
+        if shared.stop.load(Ordering::Relaxed) {
+            return;
+        }
+
         let now = Instant::now();
-        let ref_changed = match git.get_head_hash() {
+        let checkout_path = shared.checkout_path.lock().unwrap().clone();
+        let ref_changed = match git.get_head_hash_at(&checkout_path) {
             Ok(h) => {
                 let changed = last_head.as_deref() != Some(h.as_str());
                 last_head = Some(h);
@@ -487,14 +461,21 @@ fn poll_loop(pr_context: PrContext, shared: Arc<Shared>) {
         let should_fetch = ref_changed || now.duration_since(last_fetch) >= POLL_INTERVAL;
 
         if should_fetch {
-            fetch_now(&pr_context, &threads_client, &commits_client, &shared);
+            fetch_now(&shared.pr_context, &threads_client, &commits_client, &shared);
             last_fetch = Instant::now();
+        }
+
+        if shared.stop.load(Ordering::Relaxed) {
+            return;
         }
 
         // Wait for either a poke or the git check interval to elapse.
         if shared.wait_for_poke(GIT_CHECK_INTERVAL) {
+            if shared.stop.load(Ordering::Relaxed) {
+                return;
+            }
             // Poked — fetch immediately.
-            fetch_now(&pr_context, &threads_client, &commits_client, &shared);
+            fetch_now(&shared.pr_context, &threads_client, &commits_client, &shared);
             last_fetch = Instant::now();
         }
     }
@@ -578,255 +559,11 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (y, m, d)
 }
 
-fn port_file_path(pr_context: &PrContext) -> Result<PathBuf> {
-    port_file_path_for(&pr_context.owner, &pr_context.repo, pr_context.pr_number)
-}
-
-/// Resolve the port file for a given owner/repo/pr-number (without needing
-/// a full PrContext). Used by the hub to look up a peer's port by identity.
-pub fn port_file_path_for(owner: &str, repo: &str, pr_number: u64) -> Result<PathBuf> {
-    let base = dirs_cache()?;
-    let dir = base.join("pr-loop");
-    std::fs::create_dir_all(&dir).context("create cache dir")?;
-    let safe = format!(
-        "web-{}-{}-{}.port",
-        sanitize(owner),
-        sanitize(repo),
-        pr_number
-    );
-    Ok(dir.join(safe))
-}
-
-/// Read the port file for a specific PR, returning the port number if present.
-pub fn read_port(owner: &str, repo: &str, pr_number: u64) -> Option<u16> {
-    let path = port_file_path_for(owner, repo, pr_number).ok()?;
-    let s = std::fs::read_to_string(&path).ok()?;
-    s.trim().parse().ok()
-}
-
-fn sanitize(s: &str) -> String {
-    s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-        .collect()
-}
-
-fn dirs_cache() -> Result<PathBuf> {
-    if let Ok(x) = std::env::var("XDG_CACHE_HOME") {
-        if !x.is_empty() {
-            return Ok(PathBuf::from(x));
-        }
-    }
-    let home = std::env::var("HOME").context("HOME not set")?;
-    #[cfg(target_os = "macos")]
-    {
-        Ok(PathBuf::from(home).join("Library/Caches"))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        Ok(PathBuf::from(home).join(".cache"))
-    }
-}
-
-fn write_port_file(pr_context: &PrContext, port: u16) -> Result<PathBuf> {
-    let path = port_file_path(pr_context)?;
-    std::fs::write(&path, port.to_string()).context("write port file")?;
-    Ok(path)
-}
-
-/// Read a port file if present.
-fn read_port_for_pr(pr_context: &PrContext) -> Option<u16> {
-    let path = port_file_path(pr_context).ok()?;
-    let s = std::fs::read_to_string(&path).ok()?;
-    s.trim().parse().ok()
-}
-
-#[derive(Clone, Serialize, Default)]
-pub struct PeerSummary {
-    pub port: u16,
-    pub url: String,
-    pub pr_owner: String,
-    pub pr_repo: String,
-    pub pr_number: u64,
-    pub pr_title: Option<String>,
-    pub pr_url: Option<String>,
-    pub unresolved_threads: u32,
-    pub needs_response: u32,
-    pub last_commit_at: Option<String>,
-    pub last_comment_at: Option<String>,
-    /// Present if the peer couldn't be reached or parsed.
-    pub unreachable: bool,
-}
-
-/// Enumerate all pr-loop web port files in the cache dir, skipping our own.
-/// Returns (port, port_file_path) pairs so callers can delete stale files.
-fn discover_peer_ports(own_port: u16) -> Vec<(u16, PathBuf)> {
-    let Ok(base) = dirs_cache() else { return vec![] };
-    let dir = base.join("pr-loop");
-    let Ok(entries) = std::fs::read_dir(&dir) else { return vec![] };
-    entries
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().starts_with("web-"))
-        .filter_map(|e| {
-            let path = e.path();
-            let port: u16 = std::fs::read_to_string(&path).ok()?.trim().parse().ok()?;
-            if port == own_port {
-                None
-            } else {
-                Some((port, path))
-            }
-        })
-        .collect()
-}
-
-/// Call `/api/state` on another pr-loop web instance and summarize what it's
-/// tracking. Returns a PeerSummary with `unreachable: true` on failure so the
-/// UI can show something actionable (a stale port file from a crashed server
-/// looks the same).
-fn fetch_peer_summary(port: u16) -> PeerSummary {
-    let url = format!("http://127.0.0.1:{}", port);
-    let mut summary = PeerSummary {
-        port,
-        url: format!("{}/", url),
-        unreachable: true,
-        ..Default::default()
-    };
-
-    let client = match reqwest::blocking::Client::builder()
-        .timeout(Duration::from_millis(800))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return summary,
-    };
-
-    let resp = match client.get(format!("{}/api/state", url)).send() {
-        Ok(r) => r,
-        Err(_) => return summary,
-    };
-    if !resp.status().is_success() {
-        return summary;
-    }
-    let value: serde_json::Value = match resp.json() {
-        Ok(v) => v,
-        Err(_) => return summary,
-    };
-
-    summary.unreachable = false;
-
-    if let Some(pr) = value.get("pr") {
-        summary.pr_owner = pr.get("owner").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        summary.pr_repo = pr.get("repo").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        summary.pr_number = pr.get("pr_number").and_then(|v| v.as_u64()).unwrap_or(0);
-        summary.pr_title = pr.get("title").and_then(|v| v.as_str()).map(str::to_string);
-        summary.pr_url = pr.get("url").and_then(|v| v.as_str()).map(str::to_string);
-    }
-
-    // Count unresolved non-paperclip threads, and of those how many need a
-    // response (last comment not from Claude). Track newest comment timestamp.
-    let mut latest_comment: Option<String> = None;
-    if let Some(threads) = value.get("threads").and_then(|t| t.as_array()) {
-        for t in threads {
-            let is_resolved = t.get("is_resolved").and_then(|v| v.as_bool()).unwrap_or(false);
-            let is_paperclip = t.get("is_paperclip").and_then(|v| v.as_bool()).unwrap_or(false);
-            if is_resolved || is_paperclip {
-                continue;
-            }
-            summary.unresolved_threads += 1;
-            let comments = t.get("comments").and_then(|c| c.as_array());
-            let Some(cs) = comments else { continue };
-            if let Some(last) = cs.last() {
-                let body = last.get("body").and_then(|v| v.as_str()).unwrap_or("");
-                if !body.starts_with(CLAUDE_MARKER) {
-                    summary.needs_response += 1;
-                }
-            }
-            for c in cs {
-                let Some(created) = c.get("created_at").and_then(|v| v.as_str()) else { continue };
-                match &latest_comment {
-                    None => latest_comment = Some(created.to_string()),
-                    Some(cur) if cur.as_str() < created => latest_comment = Some(created.to_string()),
-                    _ => {}
-                }
-            }
-        }
-    }
-    summary.last_comment_at = latest_comment;
-
-    if let Some(commits) = value.get("commits").and_then(|c| c.as_array()) {
-        // commits are sent newest-first by the peer.
-        if let Some(first) = commits.first() {
-            summary.last_commit_at = first
-                .get("committed_date")
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
-        }
-    }
-
-    summary
-}
-
-pub fn fetch_all_peers(own_port: u16) -> Vec<PeerSummary> {
-    let mut peers: Vec<PeerSummary> = Vec::new();
-    for (port, port_file) in discover_peer_ports(own_port) {
-        let summary = fetch_peer_summary(port);
-        if summary.unreachable {
-            // Stale port file (e.g., SIGKILL'd web). Delete it so the
-            // next poll is quieter. Running webs re-write their own
-            // port file every few seconds, so this is safe: a transient
-            // failure gets healed on the next rewrite.
-            let _ = std::fs::remove_file(&port_file);
-            continue;
-        }
-        peers.push(summary);
-    }
-    peers.sort_by(|a, b| {
-        a.pr_owner
-            .cmp(&b.pr_owner)
-            .then_with(|| a.pr_repo.cmp(&b.pr_repo))
-            .then_with(|| a.pr_number.cmp(&b.pr_number))
-    });
-    peers
-}
-
-/// If a `pr-loop web` server is running for this PR, send it a poke so it
-/// immediately re-fetches from GitHub. Best-effort — failures (no server,
-/// stale port file, etc.) are silently ignored.
-pub fn poke_running_server(pr_context: &PrContext) {
-    let Some(port) = read_port_for_pr(pr_context) else {
-        return;
-    };
-    // Short timeout so we don't block the CLI on a dead server.
-    let client = match reqwest::blocking::Client::builder()
-        .timeout(Duration::from_millis(500))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-    let url = format!("http://127.0.0.1:{}/api/poke", port);
-    let _ = client.post(&url).send();
-}
-
-/// Poll the binary's mtime every few seconds; when it changes from what we
-/// observed at startup, mark an update as available. Runs forever.
-fn watch_binary_mtime(exe: PathBuf, original_mtime: SystemTime, shared: Arc<Shared>) {
-    let mut announced = false;
-    loop {
-        thread::sleep(Duration::from_secs(2));
-        let Ok(meta) = std::fs::metadata(&exe) else { continue };
-        let Ok(m) = meta.modified() else { continue };
-        if m != original_mtime {
-            if !announced {
-                eprintln!("pr-loop web: detected binary rebuild at {}", exe.display());
-                announced = true;
-            }
-            shared.update_available.store(true, Ordering::Relaxed);
-        }
-    }
-}
-
 /// Re-exec ourselves with the original argv after a short pause so the
-/// restart HTTP response has time to flush. Never returns on success.
+/// restart HTTP response has time to flush. Never returns on success. Since
+/// the hub is the only long-running process now, this restarts the hub
+/// itself, dropping every tracker's cache (cheap — each refetches on its
+/// next poll).
 #[cfg(unix)]
 fn restart_self() {
     use std::os::unix::process::CommandExt;
@@ -834,26 +571,118 @@ fn restart_self() {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("pr-loop web: restart failed (current_exe): {}", e);
+            eprintln!("pr-loop hub: restart failed (current_exe): {}", e);
             std::process::exit(1);
         }
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     eprintln!(
-        "pr-loop web: restarting via exec: {} {}",
+        "pr-loop hub: restarting via exec: {} {}",
         exe.display(),
         args.join(" ")
     );
     let err = std::process::Command::new(exe).args(&args).exec();
     // exec() only returns on failure.
-    eprintln!("pr-loop web: restart failed (exec): {}", err);
+    eprintln!("pr-loop hub: restart failed (exec): {}", err);
     std::process::exit(1);
 }
 
-fn ctrlc_cleanup(port_file: PathBuf) -> Result<()> {
-    // Best-effort: install a SIGINT handler that removes the port file and exits.
-    // We don't add a signal-handling crate; use ctrlc-free approach via libc is overkill,
-    // so we rely on the normal exit path in `run()` and the file being overwritten next time.
-    let _ = port_file;
-    Ok(())
+/// Poll the binary's mtime every few seconds; when it changes from what we
+/// observed at startup, flip `update_available`. Never flips back — the UI's
+/// restart action is the only way to "reset" it (via exec). Runs forever;
+/// spawned once by the hub, not per-tracker.
+pub fn watch_binary_mtime(exe: PathBuf, original_mtime: SystemTime, update_available: Arc<AtomicBool>) {
+    let mut announced = false;
+    loop {
+        thread::sleep(Duration::from_secs(2));
+        let Ok(meta) = std::fs::metadata(&exe) else { continue };
+        let Ok(m) = meta.modified() else { continue };
+        if m != original_mtime {
+            if !announced {
+                eprintln!("pr-loop hub: detected binary rebuild at {}", exe.display());
+                announced = true;
+            }
+            update_available.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shared_with_threads(threads: Vec<ThreadDto>) -> Shared {
+        Shared {
+            pr_context: PrContext {
+                owner: "o".to_string(),
+                repo: "r".to_string(),
+                pr_number: 1,
+            },
+            state: Mutex::new(State {
+                threads,
+                ..Default::default()
+            }),
+            trigger: (Mutex::new(false), Condvar::new()),
+            checkout_path: Mutex::new(PathBuf::from(".")),
+            last_seen: Mutex::new(Instant::now()),
+            stop: AtomicBool::new(false),
+        }
+    }
+
+    fn thread(id: &str, resolved: bool, paperclip: bool, last_comment_body: &str) -> ThreadDto {
+        ThreadDto {
+            id: id.to_string(),
+            is_resolved: resolved,
+            is_outdated: false,
+            is_paperclip: paperclip,
+            path: None,
+            line: None,
+            comments: vec![CommentDto {
+                id: "c1".to_string(),
+                author: "reviewer".to_string(),
+                body: last_comment_body.to_string(),
+                diff_hunk: None,
+                url: None,
+                created_at: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn peer_info_counts_unresolved_and_needs_response() {
+        let shared = shared_with_threads(vec![
+            thread("t1", false, false, "please fix this"),
+            thread("t2", false, false, &format!("{} done", CLAUDE_MARKER)),
+            thread("t3", true, false, "please fix this"), // resolved, excluded
+            thread("t4", false, true, "please fix this"), // paperclip, excluded
+        ]);
+
+        let info = peer_info(&shared);
+
+        assert_eq!(info.pr_owner, "o");
+        assert_eq!(info.pr_repo, "r");
+        assert_eq!(info.pr_number, 1);
+        assert_eq!(info.unresolved_threads, 2);
+        assert_eq!(info.needs_response, 1);
+    }
+
+    #[test]
+    fn peer_info_empty_threads() {
+        let shared = shared_with_threads(vec![]);
+        let info = peer_info(&shared);
+        assert_eq!(info.unresolved_threads, 0);
+        assert_eq!(info.needs_response, 0);
+    }
+
+    #[test]
+    fn peer_info_no_comments_never_needs_response() {
+        // A thread with no comments shouldn't happen in practice, but make
+        // sure it doesn't panic or count as needing a response.
+        let mut t = thread("t1", false, false, "unused");
+        t.comments.clear();
+        let shared = shared_with_threads(vec![t]);
+        let info = peer_info(&shared);
+        assert_eq!(info.unresolved_threads, 1);
+        assert_eq!(info.needs_response, 0);
+    }
 }

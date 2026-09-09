@@ -2,6 +2,7 @@
 // Uses git CLI to get commit timestamps.
 
 use anyhow::{Context, Result};
+use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -10,8 +11,12 @@ pub trait GitClient {
     /// Get the timestamp of the last commit on the current branch.
     fn get_last_commit_time(&self) -> Result<SystemTime>;
 
-    /// Get the hash of HEAD. Used to detect local ref changes cheaply.
-    fn get_head_hash(&self) -> Result<String>;
+    /// Get the hash of HEAD in `dir`. Used to detect local ref changes
+    /// cheaply. Takes an explicit directory (rather than relying on the
+    /// process's cwd) because the hub polls this on behalf of PRs it isn't
+    /// itself checked out in — `dir` is whatever checkout path the last
+    /// `pr-loop` invocation for that PR reported.
+    fn get_head_hash_at(&self, dir: &Path) -> Result<String>;
 }
 
 /// Real git client that uses the `git` CLI.
@@ -22,13 +27,15 @@ impl GitClient for RealGitClient {
         get_last_commit_time_from_git()
     }
 
-    fn get_head_hash(&self) -> Result<String> {
-        get_head_hash_from_git()
+    fn get_head_hash_at(&self, dir: &Path) -> Result<String> {
+        get_head_hash_from_git_at(dir)
     }
 }
 
-fn get_head_hash_from_git() -> Result<String> {
+fn get_head_hash_from_git_at(dir: &Path) -> Result<String> {
     let output = Command::new("git")
+        .args(["-C"])
+        .arg(dir)
         .args(["rev-parse", "HEAD"])
         .output()
         .context("Failed to run 'git rev-parse'")?;
@@ -74,7 +81,7 @@ mod tests {
         fn get_last_commit_time(&self) -> Result<SystemTime> {
             Ok(self.last_commit_time)
         }
-        fn get_head_hash(&self) -> Result<String> {
+        fn get_head_hash_at(&self, _dir: &std::path::Path) -> Result<String> {
             Ok(self.head_hash.clone())
         }
     }

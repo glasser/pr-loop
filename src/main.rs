@@ -47,6 +47,9 @@ use view_state::{
     RealViewStateClient, ViewStateClient, ViewStateFile,
 };
 use wait::{capture_snapshot, wait_until_actionable, wait_until_actionable_or_happy, WaitResult};
+use std::path::PathBuf;
+use std::thread;
+use std::time::Duration;
 
 fn main() {
     let cli = Cli::parse();
@@ -174,6 +177,31 @@ fn main() {
         }
     };
 
+    // Let `pr-loop hub` (if running) know we're working on this PR, so its
+    // web UI picks it up. The hub is assumed to be at its configured/default
+    // port on 127.0.0.1 — no discovery. Best-effort: never fail the command
+    // over this, just let the user know once so they're not left wondering
+    // why the PR never shows up in the browser.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    if !hub::notify_register(&pr_context, &cwd) {
+        eprintln!(
+            "Note: pr-loop hub doesn't seem to be running on port {} — this PR won't show in \
+             the web UI. Run `pr-loop hub` to start it.",
+            config::load().hub_port()
+        );
+    }
+    // Keep the hub's tracker alive for the life of this process. Matters for
+    // long `--wait-until-actionable[-or-happy]` runs, which can otherwise
+    // outlast the hub's staleness window between re-registrations.
+    {
+        let heartbeat_ctx = pr_context.clone();
+        let heartbeat_cwd = cwd.clone();
+        thread::spawn(move || loop {
+            thread::sleep(Duration::from_secs(60));
+            hub::notify_register(&heartbeat_ctx, &heartbeat_cwd);
+        });
+    }
+
     // Initialize PR client for status operations
     let pr_client = RealPrClient;
 
@@ -258,9 +286,9 @@ fn main() {
                         print_newer_comments(&newer_comments, &thread_id);
                     }
 
-                    // Poke a running `pr-loop web` instance so its UI
+                    // Poke the hub (if it's tracking this PR) so its UI
                     // refreshes immediately. Best-effort, ignore failures.
-                    web::poke_running_server(&pr_context);
+                    hub::poke(&pr_context);
                 }
                 Err(e) => {
                     eprintln!("Error: Failed to post reply: {}", e);
@@ -297,19 +325,6 @@ fn main() {
         Some(Command::ViewState { action }) => {
             let view_state_client = RealViewStateClient;
             run_view_state_command(&view_state_client, &pr_context, action);
-        }
-
-        Some(Command::Web { port, open, bind }) => {
-            let cfg = config::load();
-            let resolved_binds = if !bind.is_empty() {
-                bind
-            } else {
-                cfg.web_binds()
-            };
-            if let Err(e) = web::run(&pr_context, &resolved_binds, port, open) {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
         }
 
         Some(Command::Hub { .. }) | Some(Command::Config { .. }) | Some(Command::CcStatus) => {

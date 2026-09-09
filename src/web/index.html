@@ -618,10 +618,6 @@
   .peer:hover {
     border-color: var(--accent);
   }
-  .peer.unreachable {
-    opacity: 0.5;
-    font-style: italic;
-  }
   .peer .pr-line {
     font-weight: 600;
     display: flex;
@@ -773,15 +769,9 @@ function DiffHunk({ hunk }) {
   })}</pre>`;
 }
 
-// Compute the URL that a peer card should link to. When the page is being
-// served through the hub proxy (path starts with /pr/), link to the peer via
-// the proxy so the user stays on the hub's single URL. Otherwise, link
-// directly to the peer's http://127.0.0.1:<port>/ as the server reports it.
+// Every page is served through the hub now, always under /pr/<owner>/<repo>/<pr>/.
 function peerHref(peer) {
-  if (window.location.pathname.startsWith('/pr/')) {
-    return `/pr/${peer.pr_owner}/${peer.pr_repo}/${peer.pr_number}/`;
-  }
-  return peer.url;
+  return `/pr/${peer.pr_owner}/${peer.pr_repo}/${peer.pr_number}/`;
 }
 
 // Force periodic re-render for relative-time updates.
@@ -1137,7 +1127,7 @@ function PeersWidget() {
         </button>
       </div>
       ${!collapsed && peers.map(p => html`
-        <a class="peer" href=${peerHref(p)} key=${p.port}>
+        <a class="peer" href=${peerHref(p)} key=${`${p.pr_owner}/${p.pr_repo}/${p.pr_number}`}>
           <div class="pr-line">
             <span class="num">${p.pr_owner}/${p.pr_repo} #${p.pr_number}</span>
             <span class="title">${p.pr_title || ''}</span>

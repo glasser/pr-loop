@@ -1,26 +1,47 @@
-// Fixed-port reverse proxy that fronts your running `pr-loop web` instances.
+// `pr-loop hub`: the single long-running process. Fixed port, no separate
+// `pr-loop web` processes to babysit.
 //
-// Each pr-loop web binds to a random port on 127.0.0.1. The hub enumerates
-// those (via ~/Library/Caches/pr-loop/web-*.port) and:
-//   - Root `/` renders a chooser page listing all currently running instances,
+// Any `pr-loop` invocation (any subcommand, plus the bare wait modes) pings
+// `POST /api/register` on this fixed port right after it resolves its PR
+// context — see `notify_register` below, called from `main.rs`. The hub
+// keeps an in-process tracker (poll thread + cached state, from `crate::web`)
+// per PR that's pinged it within `FRESHNESS_WINDOW`, and tears trackers down
+// once they go stale. There's no discovery step and no proxying: the hub
+// *is* the server for every tracked PR.
+//
+//   - Root `/` renders a chooser page listing all currently tracked PRs,
 //     each link going to `/pr/<owner>/<repo>/<pr>/`.
-//   - Any request under `/pr/<owner>/<repo>/<pr>/<rest>` is proxied to
-//     http://127.0.0.1:<port>/<rest> for that specific instance.
+//   - `/pr/<owner>/<repo>/<pr>/<rest>` is served in-process by that PR's
+//     tracker.
 //
 // Use one stable URL (http://127.0.0.1:10099/) as your bookmark and never
-// chase random ports. With a Tailscale bind address added in config, the
-// same URL works from your phone.
+// chase per-PR processes or ports. With a Tailscale bind address added in
+// config, the same URL works from your phone.
 
-use crate::web::{fetch_all_peers, read_port, PeerSummary};
+use crate::github::PrContext;
+use crate::web::{self, PeerInfo, RequestContext, Shared};
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::net::{SocketAddr, TcpListener};
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tiny_http::{Header, Method, Response, Server};
 
 const LAUNCHD_LABEL: &str = "local.pr-loop.hub";
+
+/// How long a tracker survives without a fresh `/api/register` ping before
+/// the hub tears it down. "Recently active" per the design: any `pr-loop`
+/// invocation (not just long waits) counts, and a wait loop re-pings well
+/// inside this window (see `main.rs`), so a PR stays tracked for as long as
+/// you're actually working on it.
+const FRESHNESS_WINDOW: Duration = Duration::from_secs(10 * 60);
+/// How often the reaper sweeps for stale trackers.
+const REAP_INTERVAL: Duration = Duration::from_secs(30);
+
+type PrKey = (String, String, u64);
 
 pub fn run(binds: &[String], port: u16) -> Result<()> {
     let bind_list: Vec<String> = if binds.is_empty() {
@@ -37,7 +58,31 @@ pub fn run(binds: &[String], port: u16) -> Result<()> {
         listeners.push((bind.clone(), listener));
     }
 
-    let shared = Arc::new(HubShared { port });
+    let shared = Arc::new(HubShared {
+        trackers: Mutex::new(HashMap::new()),
+        update_available: Arc::new(AtomicBool::new(false)),
+    });
+
+    // Watch our own binary for rebuilds. Canonicalize so we follow symlinks
+    // (e.g., ~/.dotfiles/bin/pr-loop → target/release/pr-loop) and watch the
+    // file `cargo build` actually rewrites. Best-effort — if any of this
+    // fails we just skip the thread. This now covers the whole hub (there's
+    // no per-PR process left to restart individually).
+    if let Some((exe, mtime)) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.canonicalize().ok())
+        .and_then(|p| std::fs::metadata(&p).and_then(|m| m.modified()).ok().map(|m| (p, m)))
+    {
+        eprintln!("pr-loop hub: watching binary for rebuilds at {}", exe.display());
+        let update_available = Arc::clone(&shared.update_available);
+        thread::spawn(move || web::watch_binary_mtime(exe, mtime, update_available));
+    } else {
+        eprintln!("pr-loop hub: could not resolve binary path — restart detection disabled");
+    }
+
+    // Reaper: drop trackers nobody has pinged in a while.
+    let shared_reap = Arc::clone(&shared);
+    thread::spawn(move || reap_loop(shared_reap));
 
     let mut handles = Vec::new();
     for (bind, listener) in listeners {
@@ -67,20 +112,82 @@ fn parse_socket_addr(host: &str, port: u16) -> Result<SocketAddr> {
 }
 
 struct HubShared {
-    port: u16,
+    trackers: Mutex<HashMap<PrKey, Arc<Shared>>>,
+    update_available: Arc<AtomicBool>,
 }
 
-fn handle(request: tiny_http::Request, shared: &Arc<HubShared>) -> Result<()> {
+/// Periodically drop trackers that haven't been re-registered recently.
+fn reap_loop(shared: Arc<HubShared>) {
+    loop {
+        thread::sleep(REAP_INTERVAL);
+        let now = Instant::now();
+        let mut trackers = shared.trackers.lock().unwrap();
+        trackers.retain(|_, t| {
+            let fresh = now.duration_since(*t.last_seen.lock().unwrap()) < FRESHNESS_WINDOW;
+            if !fresh {
+                t.request_stop();
+            }
+            fresh
+        });
+    }
+}
+
+/// Snapshot every currently-tracked PR as `PeerInfo`, optionally excluding
+/// one (for the in-page "N other pr-loops" widget, which excludes self).
+fn snapshot_peers(shared: &HubShared, exclude: Option<&PrKey>) -> Vec<PeerInfo> {
+    let trackers = shared.trackers.lock().unwrap();
+    let mut peers: Vec<PeerInfo> = trackers
+        .iter()
+        .filter(|(k, _)| Some(*k) != exclude)
+        .map(|(_, t)| web::peer_info(t))
+        .collect();
+    peers.sort_by(|a, b| {
+        a.pr_owner
+            .cmp(&b.pr_owner)
+            .then_with(|| a.pr_repo.cmp(&b.pr_repo))
+            .then_with(|| a.pr_number.cmp(&b.pr_number))
+    });
+    peers
+}
+
+#[derive(serde::Deserialize)]
+struct RegisterReq {
+    owner: String,
+    repo: String,
+    pr_number: u64,
+    checkout_path: String,
+}
+
+fn handle(mut request: tiny_http::Request, shared: &Arc<HubShared>) -> Result<()> {
     let method = request.method().clone();
     let raw_url = request.url().to_string();
     let path = raw_url.split('?').next().unwrap_or("").to_string();
 
-    // Root page — always the chooser.
-    if method == Method::Get && path == "/" {
-        return serve_root(request, shared.port);
+    if method == Method::Post && path == "/api/register" {
+        let mut body_bytes = Vec::new();
+        request
+            .as_reader()
+            .read_to_end(&mut body_bytes)
+            .context("read register body")?;
+        return match serde_json::from_slice::<RegisterReq>(&body_bytes) {
+            Ok(req) => {
+                register(shared, req);
+                respond_json(request, "{}", 200)
+            }
+            Err(e) => respond_json(
+                request,
+                &format!("{{\"error\":\"invalid JSON: {}\"}}", e),
+                400,
+            ),
+        };
     }
 
-    // Proxy routes: /pr/<owner>/<repo>/<pr>/<rest>
+    // Root page — always the chooser.
+    if method == Method::Get && path == "/" {
+        return serve_root(request, shared);
+    }
+
+    // Per-PR routes: /pr/<owner>/<repo>/<pr>/<rest>
     if let Some(pr) = parse_pr_path(&path) {
         // Only redirect-to-trailing-slash for the bare PR root like
         // `/pr/owner/repo/1` (no rest). Sub-paths like
@@ -95,12 +202,68 @@ fn handle(request: tiny_http::Request, shared: &Arc<HubShared>) -> Result<()> {
             );
             return respond_redirect(request, 301, &loc);
         }
-        return proxy_request(request, &pr);
+
+        let key = (pr.owner.clone(), pr.repo.clone(), pr.pr_number);
+        let tracker = shared.trackers.lock().unwrap().get(&key).cloned();
+        let Some(tracker) = tracker else {
+            let resp = Response::from_string(format!(
+                "No recent pr-loop activity for {}/{} #{}. Run any `pr-loop` command against \
+                 it (e.g. `pr-loop checks`) and refresh.",
+                pr.owner, pr.repo, pr.pr_number
+            ))
+            .with_status_code(404)
+            .with_header(content_type("text/plain"));
+            return request
+                .respond(resp)
+                .map_err(|e| anyhow::anyhow!("respond: {}", e));
+        };
+
+        let peers = snapshot_peers(shared, Some(&key));
+        let ctx = RequestContext {
+            update_available: shared.update_available.load(Ordering::Relaxed),
+            peers: &peers,
+        };
+        let sub_path = format!("/{}", pr.rest);
+        return web::handle_request(request, &sub_path, &tracker, &ctx);
     }
 
     let resp = Response::from_string("not found")
         .with_status_code(404)
         .with_header(content_type("text/plain"));
+    request
+        .respond(resp)
+        .map_err(|e| anyhow::anyhow!("respond: {}", e))
+}
+
+/// Create or refresh a tracker from a `/api/register` ping.
+fn register(shared: &Arc<HubShared>, req: RegisterReq) {
+    let key = (req.owner.clone(), req.repo.clone(), req.pr_number);
+    let mut trackers = shared.trackers.lock().unwrap();
+    match trackers.get(&key) {
+        Some(t) => {
+            *t.checkout_path.lock().unwrap() = PathBuf::from(&req.checkout_path);
+            *t.last_seen.lock().unwrap() = Instant::now();
+        }
+        None => {
+            let pr_context = PrContext {
+                owner: req.owner,
+                repo: req.repo,
+                pr_number: req.pr_number,
+            };
+            eprintln!(
+                "pr-loop hub: now tracking {}/{} #{}",
+                pr_context.owner, pr_context.repo, pr_context.pr_number
+            );
+            let tracker = web::spawn_tracker(pr_context, PathBuf::from(&req.checkout_path));
+            trackers.insert(key, tracker);
+        }
+    }
+}
+
+fn respond_json(request: tiny_http::Request, body: &str, status: u16) -> Result<()> {
+    let resp = Response::from_string(body.to_string())
+        .with_status_code(status)
+        .with_header(content_type("application/json"));
     request
         .respond(resp)
         .map_err(|e| anyhow::anyhow!("respond: {}", e))
@@ -162,117 +325,8 @@ fn respond_redirect(request: tiny_http::Request, code: u16, location: &str) -> R
         .map_err(|e| anyhow::anyhow!("respond: {}", e))
 }
 
-/// Forward a request to the pr-loop web instance serving the given PR.
-fn proxy_request(mut request: tiny_http::Request, pr: &PrRoute) -> Result<()> {
-    let Some(backend_port) = read_port(&pr.owner, &pr.repo, pr.pr_number) else {
-        let resp = Response::from_string(format!(
-            "No pr-loop web running for {}/{} #{}.",
-            pr.owner, pr.repo, pr.pr_number
-        ))
-        .with_status_code(404)
-        .with_header(content_type("text/plain"));
-        return request
-            .respond(resp)
-            .map_err(|e| anyhow::anyhow!("respond: {}", e));
-    };
-
-    // Read the request body (if any) before we lose access to the reader.
-    let mut body_bytes = Vec::new();
-    request
-        .as_reader()
-        .read_to_end(&mut body_bytes)
-        .context("read proxied request body")?;
-
-    let raw_url = request.url().to_string();
-    let query = match raw_url.find('?') {
-        Some(i) => &raw_url[i..],
-        None => "",
-    };
-    let target_url = format!(
-        "http://127.0.0.1:{}/{}{}",
-        backend_port, pr.rest, query
-    );
-
-    // Forward the request with a short-ish timeout — backend is local.
-    let method_bytes = request.method().as_str().as_bytes().to_vec();
-    let method =
-        reqwest::Method::from_bytes(&method_bytes).context("unsupported HTTP method")?;
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(60))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
-    let mut req_builder = client.request(method, &target_url);
-
-    // Forward request headers, dropping hop-by-hop + Host (reqwest sets Host).
-    for h in request.headers() {
-        let name = h.field.as_str().as_str().to_ascii_lowercase();
-        if is_hop_by_hop(&name) || name == "host" || name == "content-length" {
-            continue;
-        }
-        req_builder = req_builder.header(h.field.as_str().as_str(), h.value.as_str());
-    }
-    if !body_bytes.is_empty() {
-        req_builder = req_builder.body(body_bytes);
-    }
-
-    let resp = match req_builder.send() {
-        Ok(r) => r,
-        Err(e) => {
-            let r = Response::from_string(format!("proxy error: {}", e))
-                .with_status_code(502)
-                .with_header(content_type("text/plain"));
-            return request
-                .respond(r)
-                .map_err(|e| anyhow::anyhow!("respond: {}", e));
-        }
-    };
-
-    let status_code = resp.status().as_u16();
-
-    // Preserve response headers except hop-by-hop, content-length (tiny_http
-    // writes its own), and transfer-encoding.
-    let mut forwarded_headers: Vec<Header> = Vec::new();
-    for (name, value) in resp.headers().iter() {
-        let lname = name.as_str().to_ascii_lowercase();
-        if is_hop_by_hop(&lname) || lname == "content-length" || lname == "transfer-encoding" {
-            continue;
-        }
-        if let (Ok(v), Ok(h)) = (
-            value.to_str(),
-            Header::from_bytes(name.as_str().as_bytes(), value.as_bytes()),
-        ) {
-            let _ = v;
-            forwarded_headers.push(h);
-        }
-    }
-
-    let body = resp.bytes().unwrap_or_default();
-    let body_len = body.len();
-    let mut out = Response::from_data(body.to_vec()).with_status_code(status_code);
-    for h in forwarded_headers {
-        out = out.with_header(h);
-    }
-    let _ = body_len;
-    request
-        .respond(out)
-        .map_err(|e| anyhow::anyhow!("respond: {}", e))
-}
-
-fn is_hop_by_hop(name: &str) -> bool {
-    matches!(
-        name,
-        "connection"
-            | "keep-alive"
-            | "proxy-authenticate"
-            | "proxy-authorization"
-            | "te"
-            | "trailers"
-            | "upgrade"
-    )
-}
-
-fn serve_root(request: tiny_http::Request, own_port: u16) -> Result<()> {
-    let peers = fetch_all_peers(own_port);
+fn serve_root(request: tiny_http::Request, shared: &Arc<HubShared>) -> Result<()> {
+    let peers = snapshot_peers(shared, None);
     let body = if peers.is_empty() {
         render_none_page()
     } else {
@@ -303,13 +357,13 @@ body { font: 14px -apple-system, BlinkMacSystemFont, sans-serif;
 h1 { font-size: 18px; }
 code { background: #f6f8fa; padding: 2px 5px; border-radius: 4px; }
 </style></head><body>
-<h1>No <code>pr-loop web</code> instances running</h1>
-<p>Run <code>pr-loop web</code> in a PR checkout and refresh this page.</p>
+<h1>No recently-active PRs</h1>
+<p>Run any <code>pr-loop</code> command in a PR checkout and refresh this page.</p>
 </body></html>"#
         .to_string()
 }
 
-pub fn render_chooser_page(peers: &[PeerSummary]) -> String {
+pub fn render_chooser_page(peers: &[PeerInfo]) -> String {
     let cards = peers
         .iter()
         .map(|p| {
@@ -323,7 +377,6 @@ pub fn render_chooser_page(peers: &[PeerSummary]) -> String {
             } else {
                 String::new()
             };
-            // Use a proxy-relative URL: /pr/<owner>/<repo>/<pr>/
             let href = format!(
                 "/pr/{}/{}/{}/",
                 esc(&p.pr_owner),
@@ -362,10 +415,66 @@ h1 {{ font-size: 18px; margin-bottom: 16px; }}
 .meta {{ margin-top: 4px; font-size: 12px; color: #656d76; }}
 .attn {{ color: #cf222e; font-weight: 600; }}
 </style></head><body>
-<h1>Running pr-loop web instances</h1>
+<h1>Recently active PRs</h1>
 {cards}
 </body></html>"#,
     )
+}
+
+// -- Client-side helpers: any `pr-loop` invocation calls these -------------
+
+/// Best-effort: tell the hub (assumed to be at the configured/default port
+/// on 127.0.0.1 — no discovery, per design) that `pr-loop` was just run
+/// against this PR from `checkout_path`. Creates the tracker if this is the
+/// first ping, or just refreshes its checkout path + freshness clock.
+///
+/// Returns false if the hub couldn't be reached at all (e.g. not running).
+/// Callers must never fail the command over this — it's purely so the web UI
+/// picks the PR up; a non-fatal notice is the right response to `false`.
+pub fn notify_register(pr_context: &PrContext, checkout_path: &Path) -> bool {
+    let port = crate::config::load().hub_port();
+    let url = format!("http://127.0.0.1:{}/api/register", port);
+    let body = serde_json::json!({
+        "owner": pr_context.owner,
+        "repo": pr_context.repo,
+        "pr_number": pr_context.pr_number,
+        "checkout_path": checkout_path.to_string_lossy(),
+    });
+    let Ok(client) = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(500))
+        .build()
+    else {
+        return false;
+    };
+    client
+        .post(&url)
+        .json(&body)
+        .send()
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+/// Best-effort: if the hub has a tracker for this PR, ask it to refetch from
+/// GitHub immediately, so a UI open on it updates right away after e.g.
+/// `pr-loop reply`. Silently does nothing if the hub or the tracker isn't up
+/// — same "don't fail the command over this" rule as `notify_register`.
+pub fn poke(pr_context: &PrContext) -> bool {
+    let port = crate::config::load().hub_port();
+    let url = format!(
+        "http://127.0.0.1:{}/pr/{}/{}/{}/api/poke",
+        port, pr_context.owner, pr_context.repo, pr_context.pr_number
+    );
+    let Ok(client) = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(500))
+        .build()
+    else {
+        return false;
+    };
+    client
+        .post(&url)
+        .send()
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
 }
 
 // -- LaunchAgent install/uninstall (unchanged behavior) ----------------------
@@ -522,24 +631,16 @@ mod tests {
 
     #[test]
     fn chooser_uses_proxy_paths() {
-        let peers = vec![PeerSummary {
-            port: 12345,
-            url: "http://127.0.0.1:12345/".to_string(),
+        let peers = vec![PeerInfo {
             pr_owner: "a".into(),
             pr_repo: "b".into(),
             pr_number: 7,
             pr_title: Some("hello".into()),
-            pr_url: None,
             unresolved_threads: 2,
             needs_response: 1,
-            last_commit_at: None,
-            last_comment_at: None,
-            unreachable: false,
         }];
         let html = render_chooser_page(&peers);
         assert!(html.contains(r#"href="/pr/a/b/7/""#));
-        // Should NOT contain the direct localhost URL as a link.
-        assert!(!html.contains(r#"href="http://127.0.0.1:12345/""#));
         assert!(html.contains("hello"));
         assert!(html.contains("1 needs reply"));
     }
@@ -548,6 +649,6 @@ mod tests {
     fn none_page_is_non_empty() {
         let html = render_none_page();
         assert!(html.contains("No"));
-        assert!(html.contains("pr-loop web"));
+        assert!(html.contains("pr-loop"));
     }
 }

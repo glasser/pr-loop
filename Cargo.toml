@@ -24,13 +24,10 @@ anyhow = "1"
 # Glob pattern matching for check filtering
 glob = "0.3"
 
-# HTTP server for `pr-loop web`
+# HTTP server for `pr-loop hub`
 tiny_http = "0.12"
 
-# Cross-platform browser opener for `pr-loop web`
-open = "5"
-
-# URL-safe percent encoding (for port-file paths and URL components)
+# URL-safe percent encoding (for URL path components, e.g. thread IDs)
 urlencoding = "2"
 
 # TOML parsing for ~/.config/pr-loop/config.toml
