@@ -116,7 +116,10 @@ struct HubShared {
     update_available: Arc<AtomicBool>,
 }
 
-/// Periodically drop trackers that haven't been re-registered recently.
+/// Periodically drop trackers that haven't been re-registered recently, or
+/// that we've learned are merged. Merged is permanent (unlike closed, which
+/// can be reopened), so it evicts regardless of how recently the PR was
+/// pinged — there's nothing left to track.
 fn reap_loop(shared: Arc<HubShared>) {
     loop {
         thread::sleep(REAP_INTERVAL);
@@ -124,10 +127,11 @@ fn reap_loop(shared: Arc<HubShared>) {
         let mut trackers = shared.trackers.lock().unwrap();
         trackers.retain(|_, t| {
             let fresh = now.duration_since(*t.last_seen.lock().unwrap()) < FRESHNESS_WINDOW;
-            if !fresh {
+            let keep = fresh && !t.is_merged();
+            if !keep {
                 t.request_stop();
             }
-            fresh
+            keep
         });
     }
 }

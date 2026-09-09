@@ -24,6 +24,10 @@ pub struct PrCommit {
 pub struct PrInfo {
     pub title: String,
     pub url: String,
+    /// True once GitHub reports the PR as merged. Unlike "closed" this is
+    /// terminal — a merged PR can't be un-merged — so callers that track a
+    /// PR's activity (the hub) can treat it as a permanent signal to stop.
+    pub is_merged: bool,
     pub commits: Vec<PrCommit>,
 }
 
@@ -68,6 +72,8 @@ struct PullRequestData {
     title: Option<String>,
     #[serde(default)]
     url: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
     commits: CommitsConnection,
 }
 
@@ -124,6 +130,9 @@ fn fetch_pr_info_from_graphql(owner: &str, repo: &str, pr_number: u64) -> Result
     let mut cursor: Option<String> = None;
     let mut title: Option<String> = None;
     let mut url: Option<String> = None;
+    // Reassigned every loop iteration (not just when unset, unlike
+    // title/url) — the PR's merged state doesn't vary across commit pages.
+    let mut is_merged;
 
     loop {
         let mut args = vec![
@@ -173,6 +182,7 @@ fn fetch_pr_info_from_graphql(owner: &str, repo: &str, pr_number: u64) -> Result
         if url.is_none() {
             url = pr.url;
         }
+        is_merged = pr.state.as_deref() == Some("MERGED");
         let connection = pr.commits;
 
         for n in connection.nodes {
@@ -201,6 +211,7 @@ fn fetch_pr_info_from_graphql(owner: &str, repo: &str, pr_number: u64) -> Result
     Ok(PrInfo {
         title: title.unwrap_or_default(),
         url: url.unwrap_or_default(),
+        is_merged,
         commits: all_commits,
     })
 }

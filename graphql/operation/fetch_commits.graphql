@@ -3,6 +3,7 @@ query FetchCommits($owner: String!, $repo: String!, $pr: Int!, $cursor: String) 
         pullRequest(number: $pr) {
             title
             url
+            state
             commits(first: 100, after: $cursor) {
                 nodes {
                     url

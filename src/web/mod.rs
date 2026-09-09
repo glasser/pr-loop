@@ -189,6 +189,10 @@ pub struct Shared {
     /// Last time `/api/register` refreshed this tracker. The hub's reaper
     /// uses this to decide when to tear the tracker down.
     pub last_seen: Mutex<Instant>,
+    /// Set once a fetch observes the PR as merged. Unlike staleness this is
+    /// permanent — a merged PR can't become unmerged — so once set, the hub
+    /// tears the tracker down regardless of how recently it was pinged.
+    merged: AtomicBool,
     stop: AtomicBool,
 }
 
@@ -211,9 +215,14 @@ impl Shared {
 
     /// Tell this tracker's poll thread to exit at its next check (within
     /// `GIT_CHECK_INTERVAL`). Called by the hub's reaper when the tracker
-    /// goes stale.
+    /// goes stale or merged.
     pub fn request_stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
+    }
+
+    /// True once a fetch has observed the PR as merged.
+    pub fn is_merged(&self) -> bool {
+        self.merged.load(Ordering::Relaxed)
     }
 }
 
@@ -243,6 +252,7 @@ pub fn spawn_tracker(pr_context: PrContext, checkout_path: PathBuf) -> Arc<Share
         trigger: (Mutex::new(false), Condvar::new()),
         checkout_path: Mutex::new(checkout_path),
         last_seen: Mutex::new(Instant::now()),
+        merged: AtomicBool::new(false),
         stop: AtomicBool::new(false),
         pr_context,
     });
@@ -465,7 +475,11 @@ fn poll_loop(shared: Arc<Shared>) {
             last_fetch = Instant::now();
         }
 
-        if shared.stop.load(Ordering::Relaxed) {
+        // Once merged there's nothing left to poll for — a merged PR can't
+        // reopen or change further. Stop immediately rather than waiting for
+        // the hub's reaper to notice (it will, within REAP_INTERVAL, and tear
+        // this tracker down regardless of freshness).
+        if shared.stop.load(Ordering::Relaxed) || shared.is_merged() {
             return;
         }
 
@@ -497,6 +511,7 @@ fn fetch_now(
     let checks_result =
         checks_client.fetch_checks(&pr_context.owner, &pr_context.repo, pr_context.pr_number);
 
+    let mut is_merged = false;
     let mut state = shared.state.lock().unwrap();
 
     match (threads_result, pr_info_result) {
@@ -508,6 +523,7 @@ fn fetch_now(
                 pr.title = Some(pr_info.title).filter(|s| !s.is_empty());
                 pr.url = Some(pr_info.url).filter(|s| !s.is_empty());
             }
+            is_merged = pr_info.is_merged;
             state.last_error = None;
         }
         (Err(e), _) | (_, Err(e)) => {
@@ -518,6 +534,11 @@ fn fetch_now(
         state.checks = checks.iter().map(CheckDto::from).collect();
     }
     state.last_fetched_at = Some(iso_now());
+    drop(state);
+
+    if is_merged {
+        shared.merged.store(true, Ordering::Relaxed);
+    }
 }
 
 fn iso_now() -> String {
@@ -625,6 +646,7 @@ mod tests {
             trigger: (Mutex::new(false), Condvar::new()),
             checkout_path: Mutex::new(PathBuf::from(".")),
             last_seen: Mutex::new(Instant::now()),
+            merged: AtomicBool::new(false),
             stop: AtomicBool::new(false),
         }
     }
