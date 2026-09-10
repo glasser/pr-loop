@@ -507,9 +507,16 @@ pub fn install() -> Result<()> {
     println!("  bind = [\"127.0.0.1\", \"100.64.1.2\"]  # add your tailnet IP");
     println!();
     println!("The plist is in place, so launchd will start the hub at your");
-    println!("next login. To start it right now without logging out, run:");
+    println!("next login. To start it right now without logging out:");
     println!();
-    println!("  launchctl bootstrap gui/$UID {}", plist_path.display());
+    println!("  If it's not already bootstrapped:");
+    println!("    launchctl bootstrap gui/$UID {}", plist_path.display());
+    println!("  If it's already running and you just changed this plist");
+    println!("  (e.g. rerunning --install after an update): `kickstart` alone");
+    println!("  restarts the process but won't pick up plist-level changes");
+    println!("  like PATH — bootout then bootstrap again:");
+    println!("    launchctl bootout gui/$UID/{}", LAUNCHD_LABEL);
+    println!("    launchctl bootstrap gui/$UID {}", plist_path.display());
     println!();
     println!("Then open http://127.0.0.1:10099/ and bookmark it.");
     println!();
@@ -546,6 +553,15 @@ fn log_path() -> Result<PathBuf> {
     Ok(PathBuf::from(home).join("Library/Logs/pr-loop-hub.log"))
 }
 
+/// launchd hands agents a bare-bones default PATH
+/// (`/usr/bin:/bin:/usr/sbin:/sbin`) — enough for `git` (Xcode CLT), but not
+/// for `gh`, which is virtually always a Homebrew install. The hub shells
+/// out to both, so bake Homebrew's bin dirs in (both Apple Silicon and Intel
+/// locations, harmlessly — a nonexistent PATH entry is just skipped) rather
+/// than relying on whatever shell happened to run `--install`.
+const LAUNCHD_PATH: &str =
+    "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin";
+
 fn render_plist(exe: &std::path::Path, log: &std::path::Path) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -563,6 +579,11 @@ fn render_plist(exe: &std::path::Path, log: &std::path::Path) -> String {
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>{path}</string>
+    </dict>
     <key>StandardOutPath</key>
     <string>{log}</string>
     <key>StandardErrorPath</key>
@@ -573,6 +594,7 @@ fn render_plist(exe: &std::path::Path, log: &std::path::Path) -> String {
         label = LAUNCHD_LABEL,
         exe = exe.display(),
         log = log.display(),
+        path = LAUNCHD_PATH,
     )
 }
 
@@ -654,5 +676,19 @@ mod tests {
         let html = render_none_page();
         assert!(html.contains("No"));
         assert!(html.contains("pr-loop"));
+    }
+
+    #[test]
+    fn plist_sets_path_for_homebrew_gh() {
+        // launchd's default PATH is just /usr/bin:/bin:/usr/sbin:/sbin,
+        // which is enough for `git` but not a Homebrew-installed `gh` — the
+        // hub shells out to both, so the plist must set PATH explicitly.
+        let plist = render_plist(
+            std::path::Path::new("/usr/local/bin/pr-loop"),
+            std::path::Path::new("/tmp/pr-loop-hub.log"),
+        );
+        assert!(plist.contains("<key>EnvironmentVariables</key>"));
+        assert!(plist.contains("/opt/homebrew/bin"));
+        assert!(plist.contains("/usr/local/bin"));
     }
 }
