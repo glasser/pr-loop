@@ -160,6 +160,10 @@ struct RegisterReq {
     repo: String,
     pr_number: u64,
     checkout_path: String,
+    /// `CLAUDE_PID` from the registering process's environment, if it was
+    /// run under Claude Code — see `web::Shared::claude_pid`.
+    #[serde(default)]
+    claude_pid: Option<u32>,
 }
 
 fn handle(mut request: tiny_http::Request, shared: &Arc<HubShared>) -> Result<()> {
@@ -246,6 +250,7 @@ fn register(shared: &Arc<HubShared>, req: RegisterReq) {
     match trackers.get(&key) {
         Some(t) => {
             *t.checkout_path.lock().unwrap() = PathBuf::from(&req.checkout_path);
+            *t.claude_pid.lock().unwrap() = req.claude_pid;
             *t.last_seen.lock().unwrap() = Instant::now();
         }
         None => {
@@ -258,7 +263,11 @@ fn register(shared: &Arc<HubShared>, req: RegisterReq) {
                 "pr-loop hub: now tracking {}/{} #{}",
                 pr_context.owner, pr_context.repo, pr_context.pr_number
             );
-            let tracker = web::spawn_tracker(pr_context, PathBuf::from(&req.checkout_path));
+            let tracker = web::spawn_tracker(
+                pr_context,
+                PathBuf::from(&req.checkout_path),
+                req.claude_pid,
+            );
             trackers.insert(key, tracker);
         }
     }
@@ -432,17 +441,27 @@ h1 {{ font-size: 18px; margin-bottom: 16px; }}
 /// against this PR from `checkout_path`. Creates the tracker if this is the
 /// first ping, or just refreshes its checkout path + freshness clock.
 ///
+/// Also reads `CLAUDE_PID` from our own environment and forwards it, if
+/// set — Claude Code sets it on every subprocess it spawns, including the
+/// Bash tool's shell, so this is automatic: no flag for the agent to pass,
+/// nothing to get wrong by `cd`ing somewhere before running `pr-loop`. See
+/// `web::Shared::claude_pid`.
+///
 /// Returns false if the hub couldn't be reached at all (e.g. not running).
 /// Callers must never fail the command over this — it's purely so the web UI
 /// picks the PR up; a non-fatal notice is the right response to `false`.
 pub fn notify_register(pr_context: &PrContext, checkout_path: &Path) -> bool {
     let port = crate::config::load().hub_port();
     let url = format!("http://127.0.0.1:{}/api/register", port);
+    let claude_pid: Option<u32> = std::env::var("CLAUDE_PID")
+        .ok()
+        .and_then(|s| s.parse().ok());
     let body = serde_json::json!({
         "owner": pr_context.owner,
         "repo": pr_context.repo,
         "pr_number": pr_context.pr_number,
         "checkout_path": checkout_path.to_string_lossy(),
+        "claude_pid": claude_pid,
     });
     let Ok(client) = reqwest::blocking::Client::builder()
         .timeout(Duration::from_millis(500))

@@ -10,7 +10,7 @@
 // prunes trackers that haven't been re-registered recently — see
 // `hub::FRESHNESS_WINDOW`.
 
-use crate::cc_status::{read_cc_status, CcStatus};
+use crate::cc_status::{cwd_for_claude_pid, read_cc_status, CcStatus};
 use crate::checks::{Check, CheckStatus, ChecksClient, RealChecksClient};
 use crate::commits::{CommitsClient, PrCommit, RealCommitsClient};
 use crate::git::{GitClient, RealGitClient};
@@ -170,6 +170,14 @@ struct StateResponse<'a> {
     /// True when the `pr-loop` binary on disk has been rebuilt since the hub
     /// process started. The UI surfaces a "restart" pill when this flips.
     update_available: bool,
+    /// The checkout path the most recent `/api/register` ping reported for
+    /// this PR — used for the local git-ref fast path, and as a cc_status
+    /// fallback when `claude_pid` isn't set. Surfaced for debugging.
+    checkout_path: String,
+    /// The `CLAUDE_PID` the most recent `/api/register` ping reported, if
+    /// any — see `Shared::claude_pid`. Surfaced for debugging "why is this
+    /// showing the wrong session".
+    claude_pid: Option<u32>,
 }
 
 /// Per-PR tracker state, owned by the hub's tracker map. One of these exists
@@ -186,6 +194,14 @@ pub struct Shared {
     /// fast path — both inherently path-scoped, not tied to the hub's own
     /// cwd. Refreshed on every `/api/register` ping.
     pub checkout_path: Mutex<PathBuf>,
+    /// The PID of the Claude Code process that most recently ran a
+    /// `pr-loop` command against this PR, if any (from the `CLAUDE_PID` env
+    /// var — see `register`). Preferred over `checkout_path` for cc_status:
+    /// it's Claude Code's own recorded cwd for that exact session, so it
+    /// can't be thrown off by the invoking shell having `cd`'d somewhere
+    /// else before running `pr-loop`, and can't be confused by another
+    /// Claude Code session that happens to share a directory.
+    pub claude_pid: Mutex<Option<u32>>,
     /// Last time `/api/register` refreshed this tracker. The hub's reaper
     /// uses this to decide when to tear the tracker down.
     pub last_seen: Mutex<Instant>,
@@ -237,7 +253,11 @@ pub struct RequestContext<'a> {
 /// Create a tracker for `pr_context` and spawn its background poll thread.
 /// Returns the shared handle for the hub to store in its tracker map and
 /// route requests into.
-pub fn spawn_tracker(pr_context: PrContext, checkout_path: PathBuf) -> Arc<Shared> {
+pub fn spawn_tracker(
+    pr_context: PrContext,
+    checkout_path: PathBuf,
+    claude_pid: Option<u32>,
+) -> Arc<Shared> {
     let shared = Arc::new(Shared {
         state: Mutex::new(State {
             pr: Some(PrDto {
@@ -251,6 +271,7 @@ pub fn spawn_tracker(pr_context: PrContext, checkout_path: PathBuf) -> Arc<Share
         }),
         trigger: (Mutex::new(false), Condvar::new()),
         checkout_path: Mutex::new(checkout_path),
+        claude_pid: Mutex::new(claude_pid),
         last_seen: Mutex::new(Instant::now()),
         merged: AtomicBool::new(false),
         stop: AtomicBool::new(false),
@@ -320,11 +341,22 @@ pub fn handle_request(
         (&Method::Get, "/api/state") => {
             let state = shared.state.lock().unwrap().clone();
             let checkout_path = shared.checkout_path.lock().unwrap().clone();
-            let cc_status = read_cc_status(&checkout_path);
+            let claude_pid = *shared.claude_pid.lock().unwrap();
+            // Prefer Claude Code's own recorded cwd for the session we know
+            // is driving this PR (looked up directly by PID) over our own
+            // checkout_path — the latter is only pr-loop's invocation cwd,
+            // which can differ if the agent `cd`'d into a checkout before
+            // running `pr-loop` there.
+            let cc_cwd = claude_pid
+                .and_then(cwd_for_claude_pid)
+                .unwrap_or_else(|| checkout_path.clone());
+            let cc_status = read_cc_status(&cc_cwd);
             let response = StateResponse {
                 state: &state,
                 cc_status,
                 update_available: ctx.update_available,
+                checkout_path: checkout_path.to_string_lossy().into_owned(),
+                claude_pid,
             };
             let body = serde_json::to_string(&response)?;
             build_response(body, "application/json", 200)
@@ -645,6 +677,7 @@ mod tests {
             }),
             trigger: (Mutex::new(false), Condvar::new()),
             checkout_path: Mutex::new(PathBuf::from(".")),
+            claude_pid: Mutex::new(None),
             last_seen: Mutex::new(Instant::now()),
             merged: AtomicBool::new(false),
             stop: AtomicBool::new(false),

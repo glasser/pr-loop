@@ -63,6 +63,30 @@ pub fn read_cc_status(cwd: &Path) -> Option<CcStatus> {
     diagnose_cc_status(cwd).status
 }
 
+/// The `cwd` Claude Code itself recorded for a running session, read
+/// directly from `~/.claude/sessions/<pid>.json` — the same file
+/// `pick_live_session_for_cwd` scans by matching `cwd`, but looked up
+/// directly by PID instead of guessed at.
+///
+/// This is what a caller should prefer over its own process cwd whenever it
+/// knows which Claude Code process it's ultimately running under (e.g. via
+/// the `CLAUDE_PID` env var Claude Code sets on every subprocess it spawns,
+/// including the Bash tool's shell): unlike a directory reported by the
+/// caller, a PID can't be stale from a `cd` the caller's shell made before
+/// invoking it, and looking a specific PID's file up directly — rather than
+/// scanning all session files for one whose `cwd` matches some directory —
+/// can't be confused by multiple Claude Code sessions sharing a directory
+/// either.
+pub fn cwd_for_claude_pid(pid: u32) -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    let path = PathBuf::from(home)
+        .join(".claude/sessions")
+        .join(format!("{}.json", pid));
+    let content = std::fs::read_to_string(&path).ok()?;
+    let v: Value = serde_json::from_str(&content).ok()?;
+    v.get("cwd").and_then(|c| c.as_str()).map(PathBuf::from)
+}
+
 /// Detailed breakdown of what `read_cc_status` saw while computing the
 /// returned status. Intended for the `cc-status` debug subcommand.
 pub struct CcStatusDiagnostics {
@@ -618,5 +642,40 @@ mod tests {
             },
         );
         assert!(matches!(status.activity, CcActivity::Running));
+    }
+
+    #[test]
+    fn cwd_for_claude_pid_reads_session_file_directly() {
+        // SAFETY: mutates the process-global HOME env var — serialized with
+        // other HOME-touching tests the way config::tests does (see the note
+        // there); no other concurrent test reads HOME while this one runs.
+        let prev_home = std::env::var("HOME").ok();
+        let tmp = std::env::temp_dir().join(format!(
+            "pr-loop-cc-status-test-{}",
+            std::process::id()
+        ));
+        let sessions_dir = tmp.join(".claude/sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::fs::write(
+            sessions_dir.join("4242.json"),
+            r#"{"pid":4242,"sessionId":"abc-123","cwd":"/some/real/project"}"#,
+        )
+        .unwrap();
+
+        unsafe {
+            std::env::set_var("HOME", &tmp);
+        }
+        let found = cwd_for_claude_pid(4242);
+        let missing = cwd_for_claude_pid(9999);
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert_eq!(found, Some(PathBuf::from("/some/real/project")));
+        assert_eq!(missing, None);
     }
 }
