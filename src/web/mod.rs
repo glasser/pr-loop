@@ -10,7 +10,7 @@
 // prunes trackers that haven't been re-registered recently — see
 // `hub::FRESHNESS_WINDOW`.
 
-use crate::cc_status::{cwd_for_claude_pid, read_cc_status, CcStatus};
+use crate::cc_status::{read_cc_status, read_cc_status_for_pid, CcStatus};
 use crate::checks::{Check, CheckStatus, ChecksClient, RealChecksClient};
 use crate::commits::{CommitsClient, PrCommit, RealCommitsClient};
 use crate::git::{GitClient, RealGitClient};
@@ -342,15 +342,15 @@ pub fn handle_request(
             let state = shared.state.lock().unwrap().clone();
             let checkout_path = shared.checkout_path.lock().unwrap().clone();
             let claude_pid = *shared.claude_pid.lock().unwrap();
-            // Prefer Claude Code's own recorded cwd for the session we know
-            // is driving this PR (looked up directly by PID) over our own
-            // checkout_path — the latter is only pr-loop's invocation cwd,
-            // which can differ if the agent `cd`'d into a checkout before
-            // running `pr-loop` there.
-            let cc_cwd = claude_pid
-                .and_then(cwd_for_claude_pid)
-                .unwrap_or_else(|| checkout_path.clone());
-            let cc_status = read_cc_status(&cc_cwd);
+            // Prefer the Claude Code session we know is driving this PR
+            // (looked up directly by PID) over checkout_path — the latter is
+            // only pr-loop's invocation cwd, which can differ if the agent
+            // `cd`'d into a checkout before running `pr-loop` there. Falls
+            // back to the checkout_path-based lookup if there's no PID on
+            // record, or its session file is gone (process exited).
+            let cc_status = claude_pid
+                .and_then(read_cc_status_for_pid)
+                .or_else(|| read_cc_status(&checkout_path));
             let response = StateResponse {
                 state: &state,
                 cc_status,

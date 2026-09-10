@@ -63,28 +63,44 @@ pub fn read_cc_status(cwd: &Path) -> Option<CcStatus> {
     diagnose_cc_status(cwd).status
 }
 
-/// The `cwd` Claude Code itself recorded for a running session, read
-/// directly from `~/.claude/sessions/<pid>.json` — the same file
+/// Read `~/.claude/sessions/<pid>.json` directly by PID — the same file
 /// `pick_live_session_for_cwd` scans by matching `cwd`, but looked up
-/// directly by PID instead of guessed at.
+/// directly instead of guessed at. Returns its path and parsed contents
+/// (cwd, sessionId, status/waitingFor) — `None` if the file doesn't exist or
+/// fails to parse (e.g. the process already exited and nothing's cleaned
+/// the file up yet).
 ///
-/// This is what a caller should prefer over its own process cwd whenever it
-/// knows which Claude Code process it's ultimately running under (e.g. via
-/// the `CLAUDE_PID` env var Claude Code sets on every subprocess it spawns,
-/// including the Bash tool's shell): unlike a directory reported by the
-/// caller, a PID can't be stale from a `cd` the caller's shell made before
-/// invoking it, and looking a specific PID's file up directly — rather than
-/// scanning all session files for one whose `cwd` matches some directory —
-/// can't be confused by multiple Claude Code sessions sharing a directory
-/// either.
-pub fn cwd_for_claude_pid(pid: u32) -> Option<PathBuf> {
+/// A caller that knows which Claude Code process it's ultimately running
+/// under (e.g. via the `CLAUDE_PID` env var Claude Code sets on every
+/// subprocess it spawns, including the Bash tool's shell) should prefer
+/// this over its own process cwd: unlike a directory the caller reports,
+/// a PID can't be stale from a `cd` the caller's shell made before invoking
+/// it, and looking a specific PID's file up directly — rather than scanning
+/// all session files for one whose `cwd` matches some directory — can't be
+/// confused by multiple Claude Code sessions sharing a directory either.
+fn read_live_session_by_pid(pid: u32) -> Option<(PathBuf, ParsedSession)> {
     let home = std::env::var_os("HOME")?;
     let path = PathBuf::from(home)
         .join(".claude/sessions")
         .join(format!("{}.json", pid));
     let content = std::fs::read_to_string(&path).ok()?;
-    let v: Value = serde_json::from_str(&content).ok()?;
-    v.get("cwd").and_then(|c| c.as_str()).map(PathBuf::from)
+    let parsed = parse_session_full(&content)?;
+    Some((path, parsed))
+}
+
+/// Like `read_cc_status`, but for a caller that already knows exactly which
+/// Claude Code process it's asking about (by PID, e.g. from `CLAUDE_PID`).
+/// Reads that PID's session file once and uses it for *both* the cwd and
+/// the status/waitingFor overlay — where
+/// `diagnose_cc_status` has to separately call `pick_live_session_for_cwd`,
+/// rescanning every session file and matching by cwd, that's redundant work
+/// here since we already know exactly which file we want, and it's a second
+/// place multiple Claude Code sessions sharing a directory could pick the
+/// wrong one.
+pub fn read_cc_status_for_pid(pid: u32) -> Option<CcStatus> {
+    let (session_file, parsed) = read_live_session_by_pid(pid)?;
+    let cwd = PathBuf::from(parsed.cwd?);
+    diagnose_cc_status_impl(&cwd, Some((session_file, parsed.state))).status
 }
 
 /// Detailed breakdown of what `read_cc_status` saw while computing the
@@ -101,6 +117,22 @@ pub struct CcStatusDiagnostics {
 }
 
 pub fn diagnose_cc_status(cwd: &Path) -> CcStatusDiagnostics {
+    // Status/waiting_for come from the most attention-worthy live session
+    // file whose cwd matches — we don't know a specific PID here (this path
+    // is for the cwd-only fallback and the `cc-status` debug subcommand), so
+    // scan for one. `read_cc_status_for_pid` skips this scan entirely when
+    // the caller already knows which PID it means.
+    let live_session = pick_live_session_for_cwd(cwd).map(|(path, state, _sid)| (path, state));
+    diagnose_cc_status_impl(cwd, live_session)
+}
+
+/// Shared body of `diagnose_cc_status` and `read_cc_status_for_pid`: given a
+/// resolved `cwd` and (if the caller already found one) the live session
+/// file to overlay status/waitingFor from, computes the full diagnostics.
+fn diagnose_cc_status_impl(
+    cwd: &Path,
+    live_session: Option<(PathBuf, SessionState)>,
+) -> CcStatusDiagnostics {
     let mut diag = CcStatusDiagnostics {
         cwd: cwd.to_path_buf(),
         project_dir: None,
@@ -124,9 +156,7 @@ pub fn diagnose_cc_status(cwd: &Path) -> CcStatusDiagnostics {
     let Ok(content) = read_tail(&file, MAX_TAIL_BYTES) else { return diag };
     let mut status = parse_events(&content);
 
-    // Status/waiting_for come from the most attention-worthy live session
-    // file whose cwd matches. Decoupled from the transcript choice above.
-    if let Some((path, state, _sid)) = pick_live_session_for_cwd(cwd) {
+    if let Some((path, state)) = live_session {
         diag.session_file = Some(path);
         diag.session_status_raw = state.status.clone();
         diag.session_waiting_for = state.waiting_for.clone();
@@ -644,29 +674,29 @@ mod tests {
         assert!(matches!(status.activity, CcActivity::Running));
     }
 
-    #[test]
-    fn cwd_for_claude_pid_reads_session_file_directly() {
-        // SAFETY: mutates the process-global HOME env var — serialized with
-        // other HOME-touching tests the way config::tests does (see the note
-        // there); no other concurrent test reads HOME while this one runs.
+    /// Runs `body` with HOME pointed at a scratch dir, restoring it
+    /// afterward. `body` gets the scratch dir so it can lay out
+    /// `.claude/sessions` and `.claude/projects` under it.
+    ///
+    /// SAFETY: mutates the process-global HOME env var. Every test calling
+    /// this (and config::tests' two HOME/XDG_CONFIG_HOME tests) is tagged
+    /// `#[serial(env)]` so they can't race each other — cargo test runs a
+    /// binary's tests in parallel by default, and without that they will
+    /// intermittently clobber each other's HOME mid-test.
+    fn with_scratch_home(test_name: &str, body: impl FnOnce(&Path)) {
         let prev_home = std::env::var("HOME").ok();
         let tmp = std::env::temp_dir().join(format!(
-            "pr-loop-cc-status-test-{}",
+            "pr-loop-cc-status-test-{}-{}",
+            test_name,
             std::process::id()
         ));
-        let sessions_dir = tmp.join(".claude/sessions");
-        std::fs::create_dir_all(&sessions_dir).unwrap();
-        std::fs::write(
-            sessions_dir.join("4242.json"),
-            r#"{"pid":4242,"sessionId":"abc-123","cwd":"/some/real/project"}"#,
-        )
-        .unwrap();
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
 
         unsafe {
             std::env::set_var("HOME", &tmp);
         }
-        let found = cwd_for_claude_pid(4242);
-        let missing = cwd_for_claude_pid(9999);
+        body(&tmp);
         unsafe {
             match prev_home {
                 Some(v) => std::env::set_var("HOME", v),
@@ -674,8 +704,86 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(&tmp);
+    }
 
-        assert_eq!(found, Some(PathBuf::from("/some/real/project")));
-        assert_eq!(missing, None);
+    #[test]
+    #[serial_test::serial(env)]
+    fn read_live_session_by_pid_reads_file_directly() {
+        with_scratch_home("read-live-session", |home| {
+            let sessions_dir = home.join(".claude/sessions");
+            std::fs::create_dir_all(&sessions_dir).unwrap();
+            std::fs::write(
+                sessions_dir.join("4242.json"),
+                r#"{"pid":4242,"sessionId":"abc-123","cwd":"/some/real/project","status":"waiting","waitingFor":"approve Edit"}"#,
+            )
+            .unwrap();
+
+            let (path, parsed) = read_live_session_by_pid(4242).expect("session file found");
+            assert_eq!(path, sessions_dir.join("4242.json"));
+            assert_eq!(parsed.cwd.as_deref(), Some("/some/real/project"));
+            assert_eq!(parsed.session_id, "abc-123");
+            assert_eq!(parsed.state.status.as_deref(), Some("waiting"));
+            assert_eq!(parsed.state.waiting_for.as_deref(), Some("approve Edit"));
+
+            assert!(read_live_session_by_pid(9999).is_none());
+        });
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn read_cc_status_for_pid_none_when_session_file_missing() {
+        // The exact contract web::handle_request's /api/state relies on for
+        // its checkout_path fallback: no session file for this PID at all
+        // means None, not a panic or a status for the wrong directory.
+        with_scratch_home("no-session-file", |_home| {
+            assert!(read_cc_status_for_pid(424242).is_none());
+        });
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn read_cc_status_for_pid_finds_transcript_via_session_cwd() {
+        with_scratch_home("full-pipeline", |home| {
+            let project_dir = home.join("work/my-project");
+            std::fs::create_dir_all(&project_dir).unwrap();
+
+            let sessions_dir = home.join(".claude/sessions");
+            std::fs::create_dir_all(&sessions_dir).unwrap();
+            std::fs::write(
+                sessions_dir.join("111.json"),
+                format!(
+                    r#"{{"pid":111,"sessionId":"sid-1","cwd":"{}"}}"#,
+                    project_dir.display()
+                ),
+            )
+            .unwrap();
+
+            // The transcript directory is named by encoding the *session's*
+            // cwd (not some other path) — this is the exact bug being
+            // guarded against: using the right directory. Canonicalize
+            // first, matching `session_dir_for_cwd` itself — on macOS
+            // std::env::temp_dir() lives under /var, a symlink to
+            // /private/var, so the raw and canonical paths differ.
+            let encoded: String = project_dir
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+                .collect();
+            let transcript_dir = home.join(".claude/projects").join(encoded);
+            std::fs::create_dir_all(&transcript_dir).unwrap();
+            std::fs::write(
+                transcript_dir.join("sid-1.jsonl"),
+                r#"{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","message":{"content":[{"type":"text","text":"Hello from the right session"}]}}"#,
+            )
+            .unwrap();
+
+            let status = read_cc_status_for_pid(111).expect("status found");
+            assert_eq!(
+                status.last_assistant_text.as_deref(),
+                Some("Hello from the right session")
+            );
+        });
     }
 }
