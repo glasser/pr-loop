@@ -141,9 +141,12 @@ nonsense_field = 1
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn config_path_prefers_xdg() {
-        // SAFETY: tests touching env are single-threaded via serial_test on other
-        // tests; these two env vars aren't read by other concurrent tests.
+        // #[serial(env)] pins this against every other test mutating HOME /
+        // XDG_CONFIG_HOME (here and in cc_status::tests) so they can't race
+        // and clobber each other's value mid-test — cargo test runs the
+        // whole binary's tests in parallel by default.
         let prev_xdg = std::env::var("XDG_CONFIG_HOME").ok();
         unsafe { std::env::set_var("XDG_CONFIG_HOME", "/tmp/xdg"); }
         let p = config_path().unwrap();
@@ -156,6 +159,7 @@ nonsense_field = 1
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn config_path_falls_back_to_home() {
         let prev_xdg = std::env::var("XDG_CONFIG_HOME").ok();
         let prev_home = std::env::var("HOME").ok();
