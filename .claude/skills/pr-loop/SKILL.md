@@ -33,6 +33,8 @@ git push --force-with-lease
 
 (not a plain `git push` — the rebase changed history, and `--force-with-lease` is the safe form since it fails instead of clobbering if someone else pushed in the meantime).
 
+Beyond applying the text verbatim, treat the diff between the old and new message as a style cue — line width, tone, tense, level of detail — and carry it forward to commit messages you write yourself for the rest of this session, without waiting to be told explicitly.
+
 ## Interim Acknowledgments
 
 As soon as you've formed an initial thought on a comment but still need to do more research or work before you can actually address it, post a quick interim reply:
