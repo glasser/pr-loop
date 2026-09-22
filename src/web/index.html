@@ -1402,7 +1402,11 @@ function Commit({ commit, isNew, onDismiss, onPoke }) {
               onKeyDown=${(e) => {
                 if (e.key === 'Escape') setEditing(false);
                 if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') submitReword();
-                if (e.altKey && e.key.toLowerCase() === 'q') { e.preventDefault(); rewrapParagraph(); }
+                // e.key is unreliable here: macOS remaps Option+letter to a
+                // composed character (e.g. "œ" for Option+Q) before the
+                // browser reports it. e.code reflects the physical key
+                // regardless of modifiers or layout.
+                if (e.altKey && e.code === 'KeyQ') { e.preventDefault(); rewrapParagraph(); }
               }}
             ></textarea>
             <div class="hint">
