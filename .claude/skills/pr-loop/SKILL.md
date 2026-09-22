@@ -11,10 +11,27 @@ Run the pr-loop tool in attended mode, responding to review comments and CI fail
 
 1. Run `pr-loop --wait-until-actionable --maintain-status` to wait for the PR to need attention
 2. When the tool returns, read its output carefully:
+   - If there are **commit message reword requests**, apply them first (see below) — they're quick and mechanical
    - If there are **review comments needing response**, pick one to address - make the requested changes and reply using `pr-loop reply` as instructed in the output
    - If there are **CI failures**, investigate and fix them
 3. Commit your changes (as a new commit, not amending) and push
 4. Return to step 1 and wait for the next actionable state
+
+## Commit Message Reword Requests
+
+A human can request that a specific commit's message be reworded — typically via the web UI's click-to-edit on a commit, sometimes filed by hand as a PR comment. The tool's output includes the exact command to run:
+
+```
+pr-loop reword-commit --commit <sha> --message "<exact text>" --request-id <comment_id>
+```
+
+Use the `--message` text exactly as shown in the tool's output — don't paraphrase or improve it; the human dictated the wording. This rewrites the target commit's message via a local `git rebase -i` and deletes the request comment on success. It does **not** push for you, and it does **not** create a new commit — this is the deliberate exception to "create new commits, don't amend." After it succeeds, push with:
+
+```
+git push --force-with-lease
+```
+
+(not a plain `git push` — the rebase changed history, and `--force-with-lease` is the safe form since it fails instead of clobbering if someone else pushed in the meantime).
 
 ## Interim Acknowledgments
 

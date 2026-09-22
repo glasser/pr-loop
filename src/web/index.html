@@ -356,6 +356,103 @@
     border-top-color: transparent;
   }
   .commit.new + .commit { border-top-color: transparent; }
+  .commit .title-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 4px;
+  }
+  .commit .title-row .title { flex: 1; min-width: 0; }
+  .commit .edit-btn {
+    flex-shrink: 0;
+    background: none;
+    border: none;
+    padding: 0 2px;
+    color: var(--muted);
+    cursor: pointer;
+    opacity: 0;
+    font-size: 12px;
+  }
+  .commit:hover .edit-btn { opacity: 1; }
+  .commit .edit-btn:hover { color: var(--accent); background: none; }
+  .commit .reword-pending {
+    margin-top: 4px;
+    padding: 6px 8px;
+    background: var(--in-progress-bg);
+    color: var(--in-progress-fg);
+    border-radius: 4px;
+    font-size: 12px;
+  }
+  .commit .reword-pending .label {
+    font-weight: 600;
+    display: block;
+    margin-bottom: 2px;
+  }
+  .commit .reword-pending pre {
+    margin: 0 0 4px 0;
+    white-space: pre-wrap;
+    font-family: inherit;
+  }
+  .commit .reword-pending button {
+    font-size: 11px;
+    padding: 2px 6px;
+  }
+  .reword-modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+    padding: 16px;
+  }
+  .reword-modal {
+    width: min(700px, 100%);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  }
+  .reword-modal h3 {
+    margin: 0 0 4px 0;
+    font-size: 14px;
+    font-weight: 600;
+  }
+  .reword-modal .original-sha {
+    color: var(--muted);
+    font-size: 12px;
+    margin-bottom: 10px;
+  }
+  .reword-modal .original-sha .sha {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .reword-modal textarea {
+    width: 100%;
+    height: 320px;
+    max-width: 80ch;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 13px;
+    line-height: 1.5;
+    background: var(--bg);
+    color: var(--fg);
+    resize: vertical;
+    box-sizing: border-box;
+  }
+  .reword-modal .hint {
+    color: var(--muted);
+    font-size: 12px;
+    margin-top: 6px;
+  }
+  .reword-modal .actions {
+    margin-top: 10px;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
   .thread {
     border: 1px solid var(--border);
     border-radius: 6px;
@@ -1097,24 +1194,109 @@ function CcStrip({ status }) {
   `;
 }
 
-function Commit({ commit, isNew, onDismiss }) {
+function Commit({ commit, isNew, onDismiss, onPoke }) {
   const ago = relativeTime(commit.committed_date);
   const author = commit.author_login || commit.author_name || '';
   const dismiss = () => { if (isNew) onDismiss(commit.sha); };
   const isFixup = commit.message_headline.startsWith('fixup! ');
   const title = isFixup ? commit.message_headline.slice('fixup! '.length) : commit.message_headline;
+  const fullMessage = commit.message_body
+    ? `${commit.message_headline}\n\n${commit.message_body}`
+    : commit.message_headline;
+
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(fullMessage);
+  const [posting, setPosting] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+
+  function startEdit() {
+    setDraft(commit.pending_reword ?? fullMessage);
+    setEditing(true);
+  }
+
+  async function submitReword() {
+    const message = draft.trim();
+    if (!message) return;
+    setPosting(true);
+    try {
+      const res = await fetch(`api/commits/${encodeURIComponent(commit.sha)}/reword`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message })
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setEditing(false);
+      onPoke();
+    } catch (e) {
+      alert(`Failed to request reword: ${e.message}`);
+    } finally {
+      setPosting(false);
+    }
+  }
+
+  async function cancelPending() {
+    setCancelling(true);
+    try {
+      const res = await fetch(`api/commits/${encodeURIComponent(commit.sha)}/reword`, { method: 'DELETE' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      onPoke();
+    } catch (e) {
+      alert(`Failed to cancel: ${e.message}`);
+    } finally {
+      setCancelling(false);
+    }
+  }
+
   return html`
     <div class=${'commit' + (isNew ? ' new' : '')}>
-      <a class="title" href=${commit.url} target="_blank"
-         onClick=${dismiss} onAuxClick=${dismiss}>
-        ${isFixup && html`<span class="fixup-badge">↩</span>`}${title}
-      </a>
+      <div class="title-row">
+        <a class="title" href=${commit.url} target="_blank"
+           onClick=${dismiss} onAuxClick=${dismiss}>
+          ${isFixup && html`<span class="fixup-badge">↩</span>`}${title}
+        </a>
+        ${!editing && html`
+          <button class="edit-btn" title="Edit commit message" onClick=${startEdit}>✎</button>
+        `}
+      </div>
       ${isFixup && commit.message_body_first_line && html`
         <div class="body-line">${commit.message_body_first_line}</div>
       `}
       <div class="meta">
         <span class="sha">${commit.abbreviated_sha}</span>${author ? ' · ' + author : ''}${' · '}${ago}
       </div>
+      ${editing && html`
+        <div class="reword-modal-backdrop" onClick=${(e) => { if (e.target === e.currentTarget) setEditing(false); }}>
+          <div class="reword-modal">
+            <h3>Edit commit message</h3>
+            <div class="original-sha">Rewording <span class="sha">${commit.abbreviated_sha}</span> — Claude will apply this on its next loop iteration.</div>
+            <textarea
+              autofocus
+              value=${draft}
+              onInput=${(e) => setDraft(e.target.value)}
+              onKeyDown=${(e) => {
+                if (e.key === 'Escape') setEditing(false);
+                if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') submitReword();
+              }}
+            ></textarea>
+            <div class="hint">First line is the headline; leave a blank line before the body. Cmd/Ctrl+Enter to submit, Esc to cancel.</div>
+            <div class="actions">
+              <button class=${'primary' + (posting ? ' spin' : '')} onClick=${submitReword} disabled=${posting || !draft.trim()}>
+                ${posting ? 'Requesting…' : 'Request reword'}
+              </button>
+              <button onClick=${() => setEditing(false)} disabled=${posting}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      `}
+      ${!editing && commit.pending_reword && html`
+        <div class="reword-pending">
+          <span class="label">⏳ Reword requested — Claude will apply this on its next loop iteration:</span>
+          <pre>${commit.pending_reword}</pre>
+          <button onClick=${cancelPending} disabled=${cancelling}>
+            ${cancelling ? 'Cancelling…' : 'Cancel request'}
+          </button>
+        </div>
+      `}
     </div>
   `;
 }
@@ -1303,6 +1485,7 @@ function App() {
                   commit=${c}
                   isNew=${newCommitShas.has(c.sha)}
                   onDismiss=${dismissCommit}
+                  onPoke=${poll}
                   key=${c.sha}
                 />`)}
           </div>

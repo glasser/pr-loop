@@ -2,11 +2,19 @@
 // Determines the recommended next action based on PR state.
 
 use crate::checks::ChecksSummary;
+use crate::commit_edits::CommitEditRequest;
 use crate::threads::{find_actionable_threads, ActionableThread, ReviewThread};
 
 /// The recommended next action for the PR.
 #[derive(Debug, Clone)]
 pub enum NextAction {
+    /// A human has requested one or more commit messages be reworded (via
+    /// the web UI's click-to-edit, or by hand). These are quick, mechanical,
+    /// and don't require judgment, so they take priority over everything
+    /// else — get them out of the way first.
+    RewordCommits {
+        requests: Vec<CommitEditRequest>,
+    },
     /// There are review comments that need a response.
     RespondToComments {
         threads: Vec<ActionableThread>,
@@ -28,12 +36,23 @@ pub enum NextAction {
 }
 
 /// Analyze PR state and determine the next action.
-pub fn analyze_pr(checks: &ChecksSummary, threads: Vec<ReviewThread>) -> NextAction {
+pub fn analyze_pr(
+    checks: &ChecksSummary,
+    threads: Vec<ReviewThread>,
+    pending_reword_requests: Vec<CommitEditRequest>,
+) -> NextAction {
     let actionable_threads = find_actionable_threads(threads);
     let failed_checks = checks.failed();
     let pending_checks = checks.pending();
 
-    // Priority 1: Respond to review comments
+    // Priority 1: Reword requested commit messages
+    if !pending_reword_requests.is_empty() {
+        return NextAction::RewordCommits {
+            requests: pending_reword_requests,
+        };
+    }
+
+    // Priority 2: Respond to review comments
     if !actionable_threads.is_empty() {
         return NextAction::RespondToComments {
             threads: actionable_threads,
@@ -42,14 +61,14 @@ pub fn analyze_pr(checks: &ChecksSummary, threads: Vec<ReviewThread>) -> NextAct
         };
     }
 
-    // Priority 2: Fix CI failures
+    // Priority 3: Fix CI failures
     if !failed_checks.is_empty() {
         return NextAction::FixCiFailures {
             failed_check_names: failed_checks.iter().map(|c| c.name.clone()).collect(),
         };
     }
 
-    // Priority 3: Wait for CI
+    // Priority 4: Wait for CI
     if !pending_checks.is_empty() {
         return NextAction::WaitForCi {
             pending_check_names: pending_checks.iter().map(|c| c.name.clone()).collect(),
@@ -106,7 +125,7 @@ mod tests {
         };
         let threads = vec![]; // No threads
 
-        match analyze_pr(&checks, threads) {
+        match analyze_pr(&checks, threads, vec![]) {
             NextAction::PrReady => {}
             other => panic!("Expected PrReady, got {:?}", other),
         }
@@ -123,7 +142,7 @@ mod tests {
             vec![make_comment("reviewer", "Looks good!")],
         )];
 
-        match analyze_pr(&checks, threads) {
+        match analyze_pr(&checks, threads, vec![]) {
             NextAction::PrReady => {}
             other => panic!("Expected PrReady, got {:?}", other),
         }
@@ -140,7 +159,7 @@ mod tests {
             vec![make_comment("reviewer", "Please fix this")],
         )];
 
-        match analyze_pr(&checks, threads) {
+        match analyze_pr(&checks, threads, vec![]) {
             NextAction::RespondToComments {
                 threads,
                 also_has_ci_failures,
@@ -165,7 +184,7 @@ mod tests {
             vec![make_comment("reviewer", "Question?")],
         )];
 
-        match analyze_pr(&checks, threads) {
+        match analyze_pr(&checks, threads, vec![]) {
             NextAction::RespondToComments {
                 also_has_ci_failures,
                 ..
@@ -186,7 +205,7 @@ mod tests {
         };
         let threads = vec![]; // No actionable threads
 
-        match analyze_pr(&checks, threads) {
+        match analyze_pr(&checks, threads, vec![]) {
             NextAction::FixCiFailures { failed_check_names } => {
                 assert_eq!(failed_check_names, vec!["test"]);
             }
@@ -204,7 +223,7 @@ mod tests {
         };
         let threads = vec![];
 
-        match analyze_pr(&checks, threads) {
+        match analyze_pr(&checks, threads, vec![]) {
             NextAction::WaitForCi { pending_check_names } => {
                 assert_eq!(pending_check_names, vec!["test"]);
             }
@@ -224,7 +243,7 @@ mod tests {
             vec![make_comment("reviewer", "Fix this")],
         )];
 
-        match analyze_pr(&checks, threads) {
+        match analyze_pr(&checks, threads, vec![]) {
             NextAction::RespondToComments { .. } => {}
             other => panic!("Expected RespondToComments, got {:?}", other),
         }
@@ -241,7 +260,7 @@ mod tests {
         };
         let threads = vec![];
 
-        match analyze_pr(&checks, threads) {
+        match analyze_pr(&checks, threads, vec![]) {
             NextAction::FixCiFailures { .. } => {}
             other => panic!("Expected FixCiFailures, got {:?}", other),
         }
@@ -259,7 +278,7 @@ mod tests {
             vec![make_comment("reviewer", ":paperclip: For human review only")],
         )];
 
-        match analyze_pr(&checks, threads) {
+        match analyze_pr(&checks, threads, vec![]) {
             NextAction::PrReady => {}
             other => panic!("Expected PrReady, got {:?}", other),
         }
@@ -283,12 +302,54 @@ mod tests {
             ),
         ];
 
-        match analyze_pr(&checks, threads) {
+        match analyze_pr(&checks, threads, vec![]) {
             NextAction::RespondToComments { threads, .. } => {
                 assert_eq!(threads.len(), 1);
                 assert_eq!(threads[0].thread.id, "T2");
             }
             other => panic!("Expected RespondToComments, got {:?}", other),
+        }
+    }
+
+    fn make_reword_request(sha: &str) -> CommitEditRequest {
+        CommitEditRequest {
+            comment_id: format!("comment_{}", sha),
+            sha: sha.to_string(),
+            new_message: "Better message".to_string(),
+        }
+    }
+
+    #[test]
+    fn analyze_reword_commits_over_everything_else() {
+        // A pending reword request wins even with CI failures and review
+        // comments also pending — it's quick and mechanical, so clear it first.
+        let checks = ChecksSummary {
+            checks: vec![make_check("build", CheckStatus::Fail)],
+        };
+        let threads = vec![make_thread(
+            "T1",
+            false,
+            vec![make_comment("reviewer", "Please fix this")],
+        )];
+        let reword_requests = vec![make_reword_request("abc123")];
+
+        match analyze_pr(&checks, threads, reword_requests) {
+            NextAction::RewordCommits { requests } => {
+                assert_eq!(requests.len(), 1);
+                assert_eq!(requests[0].sha, "abc123");
+            }
+            other => panic!("Expected RewordCommits, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn analyze_no_reword_requests_falls_through() {
+        let checks = ChecksSummary {
+            checks: vec![make_check("build", CheckStatus::Pass)],
+        };
+        match analyze_pr(&checks, vec![], vec![]) {
+            NextAction::PrReady => {}
+            other => panic!("Expected PrReady, got {:?}", other),
         }
     }
 }

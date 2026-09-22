@@ -6,6 +6,7 @@ mod cc_status;
 mod checks;
 mod circleci;
 mod cli;
+mod commit_edits;
 mod commits;
 mod config;
 mod credentials;
@@ -30,8 +31,9 @@ use circleci::{
 };
 use clap::Parser;
 use cli::{Cli, Command, ViewStateAction};
+use commit_edits::{CommitEditsClient, RealCommitEditsClient};
 use credentials::{CredentialProvider, Credentials, RealCredentialProvider};
-use git::RealGitClient;
+use git::{GitClient, RealGitClient};
 use github::{
     resolve_pr_context, MergeableClient, MergeableStatus, PrContext, RealGitHubClient,
     RealMergeableClient,
@@ -306,6 +308,33 @@ fn main() {
             }
         }
 
+        Some(Command::RewordCommit { commit, message, request_id }) => {
+            let git_client = RealGitClient;
+            let commit_edits_client = RealCommitEditsClient;
+
+            println!("Rewording commit {}...", commit);
+            if let Err(e) = git_client.reword_commit(&commit, &message) {
+                eprintln!("Error: Failed to reword commit: {}", e);
+                std::process::exit(1);
+            }
+            println!("✓ Commit reworded locally.");
+
+            if let Err(e) = commit_edits_client.delete_request(&pr_context.owner, &pr_context.repo, &request_id) {
+                eprintln!(
+                    "Warning: Reword applied locally, but failed to delete the request comment: {}",
+                    e
+                );
+            } else {
+                println!("✓ Request comment {} deleted.", request_id);
+            }
+
+            println!();
+            println!("This rewrote local history — push with:");
+            println!("  git push --force-with-lease");
+
+            hub::poke(&pr_context);
+        }
+
         Some(Command::Ready { preserve_claude_threads, reviewer, expected_commits }) => {
             run_ready_command(
                 &pr_client,
@@ -344,6 +373,7 @@ fn main() {
         None => {
             let checks_client = RealChecksClient;
             let threads_client = RealThreadsClient;
+            let commit_edits_client = RealCommitEditsClient;
             let git_client = RealGitClient;
             let mergeable_client = RealMergeableClient;
 
@@ -352,6 +382,7 @@ fn main() {
                 match wait_until_actionable(
                     &checks_client,
                     &threads_client,
+                    &commit_edits_client,
                     &pr_context.owner,
                     &pr_context.repo,
                     pr_context.pr_number,
@@ -383,6 +414,7 @@ fn main() {
                 match wait_until_actionable_or_happy(
                     &checks_client,
                     &threads_client,
+                    &commit_edits_client,
                     &git_client,
                     &pr_context.owner,
                     &pr_context.repo,
@@ -441,8 +473,21 @@ fn main() {
                 }
             };
 
+            // Fetch pending commit-message reword requests
+            let pending_reword_requests = match commit_edits_client.fetch_pending(
+                &pr_context.owner,
+                &pr_context.repo,
+                pr_context.pr_number,
+            ) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: Failed to fetch commit reword requests: {}", e);
+                    vec![]
+                }
+            };
+
             // Analyze and output recommendation
-            let action = analyze_pr(&checks_summary, threads);
+            let action = analyze_pr(&checks_summary, threads, pending_reword_requests);
 
             // If there are CI failures, fetch logs. fetch_ci_failure_info
             // handles the no-CircleCI-token case internally; GitHub Actions
@@ -534,6 +579,47 @@ fn print_recommendation(
     }
 
     match action {
+        NextAction::RewordCommits { requests } => {
+            println!("## ACTION REQUIRED: Reword commit message(s)");
+            println!();
+            println!(
+                "A human has requested {} commit message reword{}:",
+                requests.len(),
+                if requests.len() == 1 { "" } else { "s" }
+            );
+            println!();
+
+            for (i, req) in requests.iter().enumerate() {
+                println!("### Reword {} - commit `{}`", i + 1, req.sha);
+                println!("Request comment ID: `{}`", req.comment_id);
+                println!();
+                println!("New message:");
+                for line in req.new_message.lines() {
+                    println!("> {}", line);
+                }
+                println!();
+                println!("To apply, run:");
+                println!(
+                    "  pr-loop reword-commit --commit {} --message \"...\" --request-id {}",
+                    req.sha, req.comment_id
+                );
+                println!(
+                    "  (pass --message exactly as shown above, headline and body included)"
+                );
+                println!();
+
+                if i < requests.len() - 1 {
+                    println!("---");
+                    println!();
+                }
+            }
+
+            println!(
+                "This rewrites history, so after applying it push with `git push --force-with-lease`"
+            );
+            println!("instead of a plain `git push` — do not create a new commit for this.");
+        }
+
         NextAction::RespondToComments {
             threads,
             also_has_ci_failures,
@@ -1086,6 +1172,7 @@ fn run_ready_command(
 ) {
     let checks_client = RealChecksClient;
     let threads_client = RealThreadsClient;
+    let commit_edits_client = RealCommitEditsClient;
 
     // Step 1: Check that PR is in draft mode
     println!("Checking PR draft status...");
@@ -1159,6 +1246,7 @@ fn run_ready_command(
     let snapshot = match capture_snapshot(
         &checks_client,
         &threads_client,
+        &commit_edits_client,
         &pr_context.owner,
         &pr_context.repo,
         pr_context.pr_number,
@@ -1177,6 +1265,14 @@ fn run_ready_command(
         eprintln!(
             "Error: PR has {} unresolved review thread(s). All threads must be resolved before marking ready.",
             snapshot.unresolved_thread_ids.len()
+        );
+        std::process::exit(1);
+    }
+
+    if !snapshot.pending_reword_ids.is_empty() {
+        eprintln!(
+            "Error: PR has {} pending commit-message reword request(s). Handle those with `pr-loop reword-commit` before marking ready.",
+            snapshot.pending_reword_ids.len()
         );
         std::process::exit(1);
     }

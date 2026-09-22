@@ -2,6 +2,7 @@
 // Blocks until PR state changes to something requiring action.
 
 use crate::checks::{CheckStatus, ChecksClient, ChecksSummary};
+use crate::commit_edits::CommitEditsClient;
 use crate::git::GitClient;
 use crate::threads::{ThreadsClient, CLAUDE_MARKER};
 use anyhow::Result;
@@ -20,12 +21,16 @@ pub struct PrSnapshot {
     pub failed_check_names: HashSet<String>,
     /// Names of pending CI checks
     pub pending_check_names: HashSet<String>,
+    /// Comment IDs of pending commit-message reword requests
+    pub pending_reword_ids: HashSet<String>,
 }
 
 impl PrSnapshot {
     /// Returns true if the PR is currently actionable (needs work).
     pub fn is_actionable(&self) -> bool {
-        !self.actionable_thread_ids.is_empty() || !self.failed_check_names.is_empty()
+        !self.actionable_thread_ids.is_empty()
+            || !self.failed_check_names.is_empty()
+            || !self.pending_reword_ids.is_empty()
     }
 
     /// Returns true if CI is "happy" - all checks passed, none pending or failed.
@@ -35,7 +40,7 @@ impl PrSnapshot {
 
     /// Returns true if the PR is "happy" - CI passing and no actionable comments.
     pub fn is_happy(&self) -> bool {
-        self.is_ci_happy() && self.actionable_thread_ids.is_empty()
+        self.is_ci_happy() && self.actionable_thread_ids.is_empty() && self.pending_reword_ids.is_empty()
     }
 }
 
@@ -43,6 +48,7 @@ impl PrSnapshot {
 pub fn capture_snapshot(
     checks_client: &dyn ChecksClient,
     threads_client: &dyn ThreadsClient,
+    commit_edits_client: &dyn CommitEditsClient,
     owner: &str,
     repo: &str,
     pr_number: u64,
@@ -98,11 +104,19 @@ pub fn capture_snapshot(
         .map(|t| t.id)
         .collect();
 
+    let pending_reword_ids: HashSet<String> = commit_edits_client
+        .fetch_pending(owner, repo, pr_number)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| r.comment_id)
+        .collect();
+
     Ok(PrSnapshot {
         actionable_thread_ids,
         unresolved_thread_ids,
         failed_check_names,
         pending_check_names,
+        pending_reword_ids,
     })
 }
 
@@ -154,6 +168,7 @@ impl WaitStatus {
 pub fn wait_until_actionable(
     checks_client: &dyn ChecksClient,
     threads_client: &dyn ThreadsClient,
+    commit_edits_client: &dyn CommitEditsClient,
     owner: &str,
     repo: &str,
     pr_number: u64,
@@ -170,6 +185,7 @@ pub fn wait_until_actionable(
     let snapshot = capture_snapshot(
         checks_client,
         threads_client,
+        commit_edits_client,
         owner,
         repo,
         pr_number,
@@ -199,6 +215,7 @@ pub fn wait_until_actionable(
         let snapshot = capture_snapshot(
             checks_client,
             threads_client,
+            commit_edits_client,
             owner,
             repo,
             pr_number,
@@ -223,6 +240,7 @@ pub fn wait_until_actionable(
 pub fn wait_until_actionable_or_happy(
     checks_client: &dyn ChecksClient,
     threads_client: &dyn ThreadsClient,
+    commit_edits_client: &dyn CommitEditsClient,
     git_client: &dyn GitClient,
     owner: &str,
     repo: &str,
@@ -251,6 +269,7 @@ pub fn wait_until_actionable_or_happy(
         let snapshot = capture_snapshot(
             checks_client,
             threads_client,
+            commit_edits_client,
             owner,
             repo,
             pr_number,
@@ -290,6 +309,7 @@ pub fn wait_until_actionable_or_happy(
 mod tests {
     use super::*;
     use crate::checks::{Check, CheckStatus};
+    use crate::commit_edits::tests::TestCommitEditsClient;
     use crate::threads::{ReviewThread, ThreadComment};
 
     struct TestChecksClient {
@@ -356,9 +376,11 @@ mod tests {
         };
         let threads_client = TestThreadsClient { threads: vec![] };
 
+        let commit_edits_client = TestCommitEditsClient::default();
         let snapshot = capture_snapshot(
             &checks_client,
             &threads_client,
+            &commit_edits_client,
             "owner",
             "repo",
             1,
@@ -381,9 +403,11 @@ mod tests {
             threads: vec![make_thread("T1", false, "Please fix this")],
         };
 
+        let commit_edits_client = TestCommitEditsClient::default();
         let snapshot = capture_snapshot(
             &checks_client,
             &threads_client,
+            &commit_edits_client,
             "owner",
             "repo",
             1,
@@ -405,9 +429,11 @@ mod tests {
             threads: vec![make_thread("T1", true, "Please fix this")],
         };
 
+        let commit_edits_client = TestCommitEditsClient::default();
         let snapshot = capture_snapshot(
             &checks_client,
             &threads_client,
+            &commit_edits_client,
             "owner",
             "repo",
             1,
@@ -428,9 +454,11 @@ mod tests {
             threads: vec![make_thread("T1", false, "🤖 From Claude: Fixed!")],
         };
 
+        let commit_edits_client = TestCommitEditsClient::default();
         let snapshot = capture_snapshot(
             &checks_client,
             &threads_client,
+            &commit_edits_client,
             "owner",
             "repo",
             1,
@@ -452,9 +480,11 @@ mod tests {
         };
         let threads_client = TestThreadsClient { threads: vec![] };
 
+        let commit_edits_client = TestCommitEditsClient::default();
         let snapshot = capture_snapshot(
             &checks_client,
             &threads_client,
+            &commit_edits_client,
             "owner",
             "repo",
             1,
@@ -473,9 +503,11 @@ mod tests {
         };
         let threads_client = TestThreadsClient { threads: vec![] };
 
+        let commit_edits_client = TestCommitEditsClient::default();
         let snapshot = capture_snapshot(
             &checks_client,
             &threads_client,
+            &commit_edits_client,
             "owner",
             "repo",
             1,
@@ -494,6 +526,7 @@ mod tests {
             unresolved_thread_ids: HashSet::new(),
             failed_check_names: HashSet::new(),
             pending_check_names: HashSet::new(),
+            pending_reword_ids: HashSet::new(),
         };
         assert!(snapshot.is_ci_happy());
     }
@@ -507,6 +540,7 @@ mod tests {
             unresolved_thread_ids: HashSet::new(),
             failed_check_names: HashSet::new(),
             pending_check_names: pending,
+            pending_reword_ids: HashSet::new(),
         };
         assert!(!snapshot.is_ci_happy());
     }
@@ -520,6 +554,7 @@ mod tests {
             unresolved_thread_ids: HashSet::new(),
             failed_check_names: failed,
             pending_check_names: HashSet::new(),
+            pending_reword_ids: HashSet::new(),
         };
         assert!(!snapshot.is_ci_happy());
     }
@@ -531,6 +566,7 @@ mod tests {
             unresolved_thread_ids: HashSet::new(),
             failed_check_names: HashSet::new(),
             pending_check_names: HashSet::new(),
+            pending_reword_ids: HashSet::new(),
         };
         assert!(snapshot.is_happy());
     }
@@ -544,6 +580,7 @@ mod tests {
             unresolved_thread_ids: HashSet::new(),
             failed_check_names: HashSet::new(),
             pending_check_names: HashSet::new(),
+            pending_reword_ids: HashSet::new(),
         };
         assert!(!snapshot.is_happy());
     }
@@ -557,6 +594,7 @@ mod tests {
             unresolved_thread_ids: HashSet::new(),
             failed_check_names: HashSet::new(),
             pending_check_names: pending,
+            pending_reword_ids: HashSet::new(),
         };
         assert!(!snapshot.is_happy());
     }
@@ -585,9 +623,11 @@ mod tests {
             }],
         };
 
+        let commit_edits_client = TestCommitEditsClient::default();
         let snapshot = capture_snapshot(
             &checks_client,
             &threads_client,
+            &commit_edits_client,
             "owner",
             "repo",
             1,
@@ -636,9 +676,11 @@ mod tests {
             }],
         };
 
+        let commit_edits_client = TestCommitEditsClient::default();
         let snapshot = capture_snapshot(
             &checks_client,
             &threads_client,
+            &commit_edits_client,
             "owner",
             "repo",
             1,

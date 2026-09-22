@@ -84,6 +84,26 @@ pub enum Command {
         in_progress: bool,
     },
 
+    /// Apply a pending commit-message reword request (see the tool's default
+    /// output for pending requests). Rewrites the target commit's message
+    /// in place via `git rebase -i` and deletes the request comment on
+    /// success. Does not push — follow up with `git push --force-with-lease`.
+    RewordCommit {
+        /// Full SHA of the commit to reword, as given in the reword request.
+        #[arg(long)]
+        commit: String,
+
+        /// The new commit message (replaces the entire message, headline
+        /// and body), exactly as given in the reword request.
+        #[arg(long)]
+        message: String,
+
+        /// The GitHub comment ID of the request being applied; deleted once
+        /// the reword succeeds.
+        #[arg(long)]
+        request_id: String,
+    },
+
     /// Mark the PR as ready for review.
     /// Validates the PR is happy (CI passing, no unresolved threads), removes the status block,
     /// and marks the PR as non-draft.
@@ -277,6 +297,28 @@ mod tests {
                 assert!(!in_progress);
             }
             _ => panic!("Expected Reply command"),
+        }
+    }
+
+    #[test]
+    fn parse_reword_commit_command() {
+        let cli = Cli::parse_from([
+            "pr-loop",
+            "reword-commit",
+            "--commit",
+            "abc123",
+            "--message",
+            "New message",
+            "--request-id",
+            "789",
+        ]);
+        match cli.command {
+            Some(Command::RewordCommit { commit, message, request_id }) => {
+                assert_eq!(commit, "abc123");
+                assert_eq!(message, "New message");
+                assert_eq!(request_id, "789");
+            }
+            _ => panic!("Expected RewordCommit command"),
         }
     }
 

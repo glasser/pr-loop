@@ -12,6 +12,7 @@
 
 use crate::cc_status::{read_cc_status, read_cc_status_for_pid, CcStatus};
 use crate::checks::{Check, CheckStatus, ChecksClient, RealChecksClient};
+use crate::commit_edits::{CommitEditsClient, RealCommitEditsClient};
 use crate::commits::{CommitsClient, PrCommit, RealCommitsClient};
 use crate::git::{GitClient, RealGitClient};
 use crate::github::PrContext;
@@ -103,12 +104,21 @@ struct CommitDto {
     sha: String,
     abbreviated_sha: String,
     message_headline: String,
-    /// First non-empty line of the commit body; None if empty.
+    /// First non-empty line of the commit body; None if empty. Used for the
+    /// terse fixup-commit preview in the sidebar.
     message_body_first_line: Option<String>,
+    /// Full commit body (everything after the headline), verbatim. Used to
+    /// seed the click-to-edit textarea so editing doesn't silently drop
+    /// anything past the first body line.
+    message_body: String,
     committed_date: String,
     author_name: Option<String>,
     author_login: Option<String>,
     url: String,
+    /// Set once a reword request has been filed for this commit (via the
+    /// click-to-edit UI) and is still pending Claude picking it up. Cleared
+    /// once `pr-loop reword-commit` deletes the request comment.
+    pending_reword: Option<String>,
 }
 
 impl From<&PrCommit> for CommitDto {
@@ -123,10 +133,12 @@ impl From<&PrCommit> for CommitDto {
             abbreviated_sha: c.abbreviated_sha.clone(),
             message_headline: c.message_headline.clone(),
             message_body_first_line,
+            message_body: c.message_body.clone(),
             committed_date: c.committed_date.clone(),
             author_name: c.author_name.clone(),
             author_login: c.author_login.clone(),
             url: c.url.clone(),
+            pending_reword: None,
         }
     }
 }
@@ -450,6 +462,73 @@ pub fn handle_request(
                 ),
             }
         }
+        (&Method::Post, p) if p.starts_with("/api/commits/") && p.ends_with("/reword") => {
+            let sha = decode_thread_id(&p["/api/commits/".len()..p.len() - "/reword".len()]);
+            let mut body_bytes = Vec::new();
+            request
+                .as_reader()
+                .read_to_end(&mut body_bytes)
+                .context("read request body")?;
+
+            #[derive(serde::Deserialize)]
+            struct RewordReq {
+                message: String,
+            }
+
+            match serde_json::from_slice::<RewordReq>(&body_bytes) {
+                Ok(payload) => {
+                    let client = RealCommitEditsClient;
+                    match client.post_request(
+                        &pr_context.owner,
+                        &pr_context.repo,
+                        pr_context.pr_number,
+                        &sha,
+                        &payload.message,
+                    ) {
+                        Ok(()) => {
+                            refresh_state(pr_context, shared);
+                            shared.poke();
+                            build_response("{}".to_string(), "application/json", 200)
+                        }
+                        Err(e) => build_response(
+                            format!("{{\"error\":\"{}\"}}", e.to_string().replace('"', "'")),
+                            "application/json",
+                            500,
+                        ),
+                    }
+                }
+                Err(e) => build_response(
+                    format!("{{\"error\":\"invalid JSON: {}\"}}", e),
+                    "application/json",
+                    400,
+                ),
+            }
+        }
+        (&Method::Delete, p) if p.starts_with("/api/commits/") && p.ends_with("/reword") => {
+            let sha = decode_thread_id(&p["/api/commits/".len()..p.len() - "/reword".len()]);
+            let client = RealCommitEditsClient;
+            let result = client
+                .fetch_pending(&pr_context.owner, &pr_context.repo, pr_context.pr_number)
+                .and_then(|pending| {
+                    match pending.into_iter().find(|r| r.sha == sha) {
+                        Some(req) => client.delete_request(&pr_context.owner, &pr_context.repo, &req.comment_id),
+                        // Already gone (e.g. Claude just applied it) — treat as success.
+                        None => Ok(()),
+                    }
+                });
+            match result {
+                Ok(()) => {
+                    refresh_state(pr_context, shared);
+                    shared.poke();
+                    build_response("{}".to_string(), "application/json", 200)
+                }
+                Err(e) => build_response(
+                    format!("{{\"error\":\"{}\"}}", e.to_string().replace('"', "'")),
+                    "application/json",
+                    500,
+                ),
+            }
+        }
         _ => build_response("not found".to_string(), "text/plain", 404),
     };
 
@@ -464,7 +543,8 @@ pub fn handle_request(
 fn refresh_state(pr_context: &PrContext, shared: &Arc<Shared>) {
     let threads_client = RealThreadsClient;
     let commits_client = RealCommitsClient;
-    fetch_now(pr_context, &threads_client, &commits_client, shared);
+    let commit_edits_client = RealCommitEditsClient;
+    fetch_now(pr_context, &threads_client, &commits_client, &commit_edits_client, shared);
 }
 
 fn build_response(body: String, ct: &str, status: u16) -> Response<std::io::Cursor<Vec<u8>>> {
@@ -486,6 +566,7 @@ fn decode_thread_id(raw: &str) -> String {
 fn poll_loop(shared: Arc<Shared>) {
     let threads_client = RealThreadsClient;
     let commits_client = RealCommitsClient;
+    let commit_edits_client = RealCommitEditsClient;
     let git = RealGitClient;
 
     let mut last_head: Option<String> = None;
@@ -510,7 +591,7 @@ fn poll_loop(shared: Arc<Shared>) {
         let should_fetch = ref_changed || now.duration_since(last_fetch) >= POLL_INTERVAL;
 
         if should_fetch {
-            fetch_now(&shared.pr_context, &threads_client, &commits_client, &shared);
+            fetch_now(&shared.pr_context, &threads_client, &commits_client, &commit_edits_client, &shared);
             last_fetch = Instant::now();
         }
 
@@ -528,7 +609,7 @@ fn poll_loop(shared: Arc<Shared>) {
                 return;
             }
             // Poked — fetch immediately.
-            fetch_now(&shared.pr_context, &threads_client, &commits_client, &shared);
+            fetch_now(&shared.pr_context, &threads_client, &commits_client, &commit_edits_client, &shared);
             last_fetch = Instant::now();
         }
     }
@@ -538,6 +619,7 @@ fn fetch_now(
     pr_context: &PrContext,
     threads_client: &dyn ThreadsClient,
     commits_client: &dyn CommitsClient,
+    commit_edits_client: &dyn CommitEditsClient,
     shared: &Arc<Shared>,
 ) {
     let threads_result =
@@ -549,6 +631,11 @@ fn fetch_now(
     let checks_client = RealChecksClient;
     let checks_result =
         checks_client.fetch_checks(&pr_context.owner, &pr_context.repo, pr_context.pr_number);
+    let pending_reword_result = commit_edits_client.fetch_pending(
+        &pr_context.owner,
+        &pr_context.repo,
+        pr_context.pr_number,
+    );
 
     let mut is_merged = false;
     let mut state = shared.state.lock().unwrap();
@@ -558,6 +645,14 @@ fn fetch_now(
             state.threads = threads.iter().map(ThreadDto::from).collect();
             // GitHub returns commits oldest-first; UI shows newest on top.
             state.commits = pr_info.commits.iter().rev().map(CommitDto::from).collect();
+            if let Ok(pending) = &pending_reword_result {
+                for commit in &mut state.commits {
+                    commit.pending_reword = pending
+                        .iter()
+                        .find(|r| r.sha == commit.sha)
+                        .map(|r| r.new_message.clone());
+                }
+            }
             if let Some(pr) = state.pr.as_mut() {
                 pr.title = Some(pr_info.title).filter(|s| !s.is_empty());
                 pr.url = Some(pr_info.url).filter(|s| !s.is_empty());
@@ -735,6 +830,93 @@ mod tests {
         let info = peer_info(&shared);
         assert_eq!(info.unresolved_threads, 0);
         assert_eq!(info.needs_response, 0);
+    }
+
+    struct EmptyThreadsClient;
+    impl ThreadsClient for EmptyThreadsClient {
+        fn fetch_threads(&self, _owner: &str, _repo: &str, _pr: u64) -> Result<Vec<ReviewThread>> {
+            Ok(vec![])
+        }
+        fn fetch_thread_by_comment_id(&self, _id: &str) -> Result<ReviewThread> {
+            anyhow::bail!("not found")
+        }
+    }
+
+    fn make_pr_commit(sha: &str, headline: &str) -> crate::commits::PrCommit {
+        crate::commits::PrCommit {
+            sha: sha.to_string(),
+            abbreviated_sha: sha.to_string(),
+            message_headline: headline.to_string(),
+            message_body: String::new(),
+            committed_date: "2024-01-01T00:00:00Z".to_string(),
+            author_name: None,
+            author_login: None,
+            url: format!("https://example.com/{}", sha),
+        }
+    }
+
+    #[test]
+    fn fetch_now_marks_pending_reword_on_matching_commit() {
+        let shared = Arc::new(shared_with_threads(vec![]));
+        let threads_client = EmptyThreadsClient;
+        let commits_client = crate::commits::tests::TestCommitsClient {
+            info: crate::commits::PrInfo {
+                title: "t".to_string(),
+                url: "u".to_string(),
+                is_merged: false,
+                commits: vec![make_pr_commit("abc", "Fix bug"), make_pr_commit("def", "Add feature")],
+            },
+        };
+        let commit_edits_client = crate::commit_edits::tests::TestCommitEditsClient {
+            pending: vec![crate::commit_edits::CommitEditRequest {
+                comment_id: "1".to_string(),
+                sha: "abc".to_string(),
+                new_message: "Better message".to_string(),
+            }],
+            ..Default::default()
+        };
+
+        fetch_now(&shared.pr_context, &threads_client, &commits_client, &commit_edits_client, &shared);
+
+        let state = shared.state.lock().unwrap();
+        assert_eq!(state.commits.len(), 2);
+        let abc = state.commits.iter().find(|c| c.sha == "abc").unwrap();
+        let def = state.commits.iter().find(|c| c.sha == "def").unwrap();
+        assert_eq!(abc.pending_reword.as_deref(), Some("Better message"));
+        assert_eq!(def.pending_reword, None);
+    }
+
+    #[test]
+    fn fetch_now_no_pending_requests_leaves_commits_unmarked() {
+        let shared = Arc::new(shared_with_threads(vec![]));
+        let threads_client = EmptyThreadsClient;
+        let commits_client = crate::commits::tests::TestCommitsClient {
+            info: crate::commits::PrInfo {
+                title: "t".to_string(),
+                url: "u".to_string(),
+                is_merged: false,
+                commits: vec![make_pr_commit("abc", "Fix bug")],
+            },
+        };
+        let commit_edits_client = crate::commit_edits::tests::TestCommitEditsClient::default();
+
+        fetch_now(&shared.pr_context, &threads_client, &commits_client, &commit_edits_client, &shared);
+
+        let state = shared.state.lock().unwrap();
+        assert_eq!(state.commits[0].pending_reword, None);
+    }
+
+    #[test]
+    fn commit_dto_carries_full_body_not_just_first_line() {
+        // Regression test: the click-to-edit UI needs the whole body to seed
+        // its textarea, not just the truncated preview line.
+        let mut commit = make_pr_commit("abc", "Headline");
+        commit.message_body = "First line.\n\nSecond paragraph with more detail.".to_string();
+
+        let dto = CommitDto::from(&commit);
+
+        assert_eq!(dto.message_body_first_line.as_deref(), Some("First line."));
+        assert_eq!(dto.message_body, "First line.\n\nSecond paragraph with more detail.");
     }
 
     #[test]
