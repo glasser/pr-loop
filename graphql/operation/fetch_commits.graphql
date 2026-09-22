@@ -4,6 +4,8 @@ query FetchCommits($owner: String!, $repo: String!, $pr: Int!, $cursor: String) 
             title
             url
             state
+            isDraft
+            isInMergeQueue
             commits(first: 100, after: $cursor) {
                 nodes {
                     url

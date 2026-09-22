@@ -13,7 +13,7 @@
 use crate::cc_status::{read_cc_status, read_cc_status_for_pid, CcStatus};
 use crate::checks::{Check, CheckStatus, ChecksClient, RealChecksClient};
 use crate::commit_edits::{CommitEditsClient, RealCommitEditsClient};
-use crate::commits::{CommitsClient, PrCommit, RealCommitsClient};
+use crate::commits::{CommitsClient, PrCommit, PrState, RealCommitsClient};
 use crate::git::{GitClient, RealGitClient};
 use crate::github::PrContext;
 use crate::reply::{RealReplyClient, ReplyClient};
@@ -42,6 +42,10 @@ struct PrDto {
     pr_number: u64,
     title: Option<String>,
     url: Option<String>,
+    /// One of: "open", "closed", "merged". Drives the status badge.
+    state: &'static str,
+    is_draft: bool,
+    is_in_merge_queue: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -285,6 +289,9 @@ pub fn spawn_tracker(
                 pr_number: pr_context.pr_number,
                 title: None,
                 url: None,
+                state: "open",
+                is_draft: false,
+                is_in_merge_queue: false,
             }),
             ..Default::default()
         }),
@@ -653,11 +660,18 @@ fn fetch_now(
                         .map(|r| r.new_message.clone());
                 }
             }
+            is_merged = pr_info.is_merged();
             if let Some(pr) = state.pr.as_mut() {
                 pr.title = Some(pr_info.title).filter(|s| !s.is_empty());
                 pr.url = Some(pr_info.url).filter(|s| !s.is_empty());
+                pr.state = match pr_info.state {
+                    PrState::Open => "open",
+                    PrState::Closed => "closed",
+                    PrState::Merged => "merged",
+                };
+                pr.is_draft = pr_info.is_draft;
+                pr.is_in_merge_queue = pr_info.is_in_merge_queue;
             }
-            is_merged = pr_info.is_merged;
             state.last_error = None;
         }
         (Err(e), _) | (_, Err(e)) => {
@@ -863,7 +877,9 @@ mod tests {
             info: crate::commits::PrInfo {
                 title: "t".to_string(),
                 url: "u".to_string(),
-                is_merged: false,
+                state: crate::commits::PrState::Open,
+                is_draft: false,
+                is_in_merge_queue: false,
                 commits: vec![make_pr_commit("abc", "Fix bug"), make_pr_commit("def", "Add feature")],
             },
         };
@@ -894,7 +910,9 @@ mod tests {
             info: crate::commits::PrInfo {
                 title: "t".to_string(),
                 url: "u".to_string(),
-                is_merged: false,
+                state: crate::commits::PrState::Open,
+                is_draft: false,
+                is_in_merge_queue: false,
                 commits: vec![make_pr_commit("abc", "Fix bug")],
             },
         };

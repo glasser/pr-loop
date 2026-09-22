@@ -24,6 +24,7 @@
     --outdated: #ffd9a8;
     --in-progress-bg: #ddf4ff;
     --in-progress-fg: #0969da;
+    --merged-fg: #8250df;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -42,6 +43,7 @@
       --outdated: #553b1b;
       --in-progress-bg: #0d2c47;
       --in-progress-fg: #79c0ff;
+      --merged-fg: #ab7df8;
     }
   }
   * { box-sizing: border-box; }
@@ -222,6 +224,23 @@
     white-space: nowrap;
     min-width: 0;
   }
+  .pr-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    flex-shrink: 0;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: color-mix(in srgb, currentColor 15%, transparent);
+  }
+  .pr-status svg { width: 14px; height: 14px; fill: currentColor; }
+  .pr-status.open { color: var(--ok-fg); }
+  .pr-status.draft { color: var(--muted); }
+  .pr-status.merged { color: var(--merged-fg); }
+  .pr-status.closed { color: var(--danger-fg); }
+  .pr-status.queued { color: var(--accent); }
   #header a { color: var(--accent); text-decoration: none; }
   #header a:hover { text-decoration: underline; }
   #header .meta {
@@ -1023,6 +1042,40 @@ function Thread({ thread, onPoke }) {
   `;
 }
 
+// Octicon paths, matching github.com's own PR state icons.
+const PR_STATUS_ICONS = {
+  open: 'M1.5 3.25a2.25 2.25 0 1 1 3 2.122v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.25 2.25 0 0 1 1.5 3.25Zm5.677-.177L9.573.677A.25.25 0 0 1 10 .854V2.5h1A2.5 2.5 0 0 1 13.5 5v5.628a2.251 2.251 0 1 1-1.5 0V5a1 1 0 0 0-1-1h-1v1.646a.25.25 0 0 1-.427.177L7.177 3.427a.25.25 0 0 1 0-.354ZM3.75 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm0 9.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm8.25.75a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Z',
+  draft: 'M3.25 1A2.25 2.25 0 0 1 4 5.372v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.251 2.251 0 0 1 3.25 1Zm9.5 14a2.25 2.25 0 1 1 0-4.5 2.25 2.25 0 0 1 0 4.5ZM2.5 3.25a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0ZM3.25 12a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm9.5 0a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5ZM14 7.5a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 0 1 2.5 0Zm0-4.25a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 0 1 2.5 0Z',
+  merged: 'M5.45 5.154A4.25 4.25 0 0 0 9.25 7.5h1.378a2.251 2.251 0 1 1 0 1.5H9.25A5.734 5.734 0 0 1 5 7.123v3.505a2.25 2.25 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.95-.218ZM4.25 13.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm8.5-4.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM5 3.25a.75.75 0 1 0 0 .005V3.25Z',
+  closed: 'M3.25 1A2.25 2.25 0 0 1 4 5.372v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.251 2.251 0 0 1 3.25 1Zm9.5 5.5a.75.75 0 0 1 .75.75v3.378a2.251 2.251 0 1 1-1.5 0V7.25a.75.75 0 0 1 .75-.75Zm-2.03-5.273a.75.75 0 0 1 1.06 0l.97.97.97-.97a.748.748 0 0 1 1.265.332.75.75 0 0 1-.205.729l-.97.97.97.97a.751.751 0 0 1-.018 1.042.751.751 0 0 1-1.042.018l-.97-.97-.97.97a.749.749 0 0 1-1.275-.326.749.749 0 0 1 .215-.734l.97-.97-.97-.97a.75.75 0 0 1 0-1.06ZM2.5 3.25a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0ZM3.25 12a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm9.5 0a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Z',
+  queued: 'M3.75 4.5a1.25 1.25 0 1 0 0-2.5 1.25 1.25 0 0 0 0 2.5ZM3 7.75a.75.75 0 0 1 1.5 0v2.878a2.251 2.251 0 1 1-1.5 0Zm.75 5.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm5-7.75a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 0 1 2.5 0Zm5.75 2.5a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Zm-1.5 0a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Z',
+};
+
+function PrStatusBadge({ pr }) {
+  if (!pr) return null;
+  // Precedence matches github.com: a terminal state (merged/closed) wins
+  // over draft/queued, which describe an still-open PR's path to merging.
+  const kind =
+    pr.state === 'merged' ? 'merged' :
+    pr.state === 'closed' ? 'closed' :
+    pr.is_in_merge_queue ? 'queued' :
+    pr.is_draft ? 'draft' :
+    'open';
+  const label = {
+    merged: 'Merged',
+    closed: 'Closed',
+    queued: 'Queued to merge',
+    draft: 'Draft',
+    open: 'Open',
+  }[kind];
+  return html`
+    <span class=${'pr-status ' + kind} title=${label}>
+      <svg viewBox="0 0 16 16"><path d=${PR_STATUS_ICONS[kind]}/></svg>
+      ${label}
+    </span>
+  `;
+}
+
 function CiStrip({ checks }) {
   if (!checks || checks.length === 0) return null;
   const counts = { pass: 0, fail: 0, pending: 0, skipping: 0, cancelled: 0 };
@@ -1458,6 +1511,7 @@ function App() {
         <${CcStrip} status=${data.cc_status} />
         <div id="header">
           <h1>
+            <${PrStatusBadge} pr=${data.pr} />
             ${data.pr.url
               ? html`<a href=${data.pr.url} target="_blank">${data.pr.owner}/${data.pr.repo} #${data.pr.pr_number}</a>`
               : html`${data.pr.owner}/${data.pr.repo} #${data.pr.pr_number}`}

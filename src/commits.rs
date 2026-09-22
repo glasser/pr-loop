@@ -18,17 +18,33 @@ pub struct PrCommit {
     pub url: String,
 }
 
+/// A PR's lifecycle state, as reported by GitHub's `PullRequest.state`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrState {
+    Open,
+    Closed,
+    Merged,
+}
+
 /// PR identity fields that come back from the commits query, since we're
 /// already making that call.
 #[derive(Debug, Clone)]
 pub struct PrInfo {
     pub title: String,
     pub url: String,
+    pub state: PrState,
+    pub is_draft: bool,
+    pub is_in_merge_queue: bool,
+    pub commits: Vec<PrCommit>,
+}
+
+impl PrInfo {
     /// True once GitHub reports the PR as merged. Unlike "closed" this is
     /// terminal — a merged PR can't be un-merged — so callers that track a
     /// PR's activity (the hub) can treat it as a permanent signal to stop.
-    pub is_merged: bool,
-    pub commits: Vec<PrCommit>,
+    pub fn is_merged(&self) -> bool {
+        self.state == PrState::Merged
+    }
 }
 
 /// Trait for fetching PR commits, allowing test implementations.
@@ -74,6 +90,10 @@ struct PullRequestData {
     url: Option<String>,
     #[serde(default)]
     state: Option<String>,
+    #[serde(default, rename = "isDraft")]
+    is_draft: bool,
+    #[serde(default, rename = "isInMergeQueue")]
+    is_in_merge_queue: bool,
     commits: CommitsConnection,
 }
 
@@ -131,8 +151,10 @@ fn fetch_pr_info_from_graphql(owner: &str, repo: &str, pr_number: u64) -> Result
     let mut title: Option<String> = None;
     let mut url: Option<String> = None;
     // Reassigned every loop iteration (not just when unset, unlike
-    // title/url) — the PR's merged state doesn't vary across commit pages.
-    let mut is_merged;
+    // title/url) — these don't vary across commit pages.
+    let mut state;
+    let mut is_draft;
+    let mut is_in_merge_queue;
 
     loop {
         let mut args = vec![
@@ -182,7 +204,13 @@ fn fetch_pr_info_from_graphql(owner: &str, repo: &str, pr_number: u64) -> Result
         if url.is_none() {
             url = pr.url;
         }
-        is_merged = pr.state.as_deref() == Some("MERGED");
+        state = match pr.state.as_deref() {
+            Some("MERGED") => PrState::Merged,
+            Some("CLOSED") => PrState::Closed,
+            _ => PrState::Open,
+        };
+        is_draft = pr.is_draft;
+        is_in_merge_queue = pr.is_in_merge_queue;
         let connection = pr.commits;
 
         for n in connection.nodes {
@@ -211,7 +239,9 @@ fn fetch_pr_info_from_graphql(owner: &str, repo: &str, pr_number: u64) -> Result
     Ok(PrInfo {
         title: title.unwrap_or_default(),
         url: url.unwrap_or_default(),
-        is_merged,
+        state,
+        is_draft,
+        is_in_merge_queue,
         commits: all_commits,
     })
 }
