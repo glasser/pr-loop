@@ -5,8 +5,8 @@
 <title>pr-loop web</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230969da'/><path d='M 12 6 A 11 11 0 1 0 20 6' fill='none' stroke='white' stroke-width='3' stroke-linecap='round'/><polygon points='17,2 25,6 19,10' fill='white'/></svg>">
 
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@5/github-markdown.min.css">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github.min.css">
+<link rel="stylesheet" href="vendor/github-markdown.min.css">
+<link rel="stylesheet" href="vendor/highlightjs-github.min.css">
 <style>
   :root {
     --bg: #ffffff;
@@ -794,12 +794,12 @@
 <div id="root"></div>
 
 <script type="module">
-import { h, render } from 'https://esm.sh/preact@10.22.0';
-import { useState, useEffect, useLayoutEffect, useRef } from 'https://esm.sh/preact@10.22.0/hooks';
-import htm from 'https://esm.sh/htm@3.1.1';
-import MarkdownIt from 'https://esm.sh/markdown-it@14.1.0';
-import { full as markdownItEmoji } from 'https://esm.sh/markdown-it-emoji@3.0.0';
-import hljs from 'https://esm.sh/highlight.js@11.10.0';
+import { h, render } from './vendor/preact.mjs';
+import { useState, useEffect, useLayoutEffect, useRef } from './vendor/hooks.mjs';
+import htm from './vendor/htm.mjs';
+import MarkdownIt from './vendor/markdown-it.mjs';
+import { full as markdownItEmoji } from './vendor/markdown-it-emoji.mjs';
+import hljs from './vendor/highlightjs.mjs';
 
 const html = htm.bind(h);
 

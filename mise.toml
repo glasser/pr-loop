@@ -1,2 +1,6 @@
 [tools]
 rust = "1.94.1"
+
+[tasks."web:update-vendor"]
+description = "Re-fetch vendored browser JS/CSS deps for the web UI (src/web/vendor)"
+run = "scripts/update-web-vendor.sh"

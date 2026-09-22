@@ -30,6 +30,17 @@ use tiny_http::{Header, Method, Response};
 
 const INDEX_HTML: &str = include_str!("index.html");
 
+// Browser JS/CSS deps, vendored (see scripts/update-web-vendor.sh) rather
+// than pulled from a CDN at runtime, and served below alongside the page.
+const VENDOR_PREACT_MJS: &str = include_str!("vendor/preact.mjs");
+const VENDOR_HOOKS_MJS: &str = include_str!("vendor/hooks.mjs");
+const VENDOR_HTM_MJS: &str = include_str!("vendor/htm.mjs");
+const VENDOR_MARKDOWN_IT_MJS: &str = include_str!("vendor/markdown-it.mjs");
+const VENDOR_MARKDOWN_IT_EMOJI_MJS: &str = include_str!("vendor/markdown-it-emoji.mjs");
+const VENDOR_HIGHLIGHTJS_MJS: &str = include_str!("vendor/highlightjs.mjs");
+const VENDOR_GITHUB_MARKDOWN_CSS: &str = include_str!("vendor/github-markdown.min.css");
+const VENDOR_HIGHLIGHTJS_GITHUB_CSS: &str = include_str!("vendor/highlightjs-github.min.css");
+
 /// How often the poller re-fetches from GitHub even when idle.
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
 /// How often the poller checks the local git ref for changes.
@@ -364,6 +375,30 @@ pub fn handle_request(
 
     let resp = match (&method, path) {
         (&Method::Get, "/") => build_response(INDEX_HTML.to_string(), "text/html; charset=utf-8", 200),
+        (&Method::Get, "/vendor/preact.mjs") => {
+            build_response(VENDOR_PREACT_MJS.to_string(), "text/javascript; charset=utf-8", 200)
+        }
+        (&Method::Get, "/vendor/hooks.mjs") => {
+            build_response(VENDOR_HOOKS_MJS.to_string(), "text/javascript; charset=utf-8", 200)
+        }
+        (&Method::Get, "/vendor/htm.mjs") => {
+            build_response(VENDOR_HTM_MJS.to_string(), "text/javascript; charset=utf-8", 200)
+        }
+        (&Method::Get, "/vendor/markdown-it.mjs") => {
+            build_response(VENDOR_MARKDOWN_IT_MJS.to_string(), "text/javascript; charset=utf-8", 200)
+        }
+        (&Method::Get, "/vendor/markdown-it-emoji.mjs") => {
+            build_response(VENDOR_MARKDOWN_IT_EMOJI_MJS.to_string(), "text/javascript; charset=utf-8", 200)
+        }
+        (&Method::Get, "/vendor/highlightjs.mjs") => {
+            build_response(VENDOR_HIGHLIGHTJS_MJS.to_string(), "text/javascript; charset=utf-8", 200)
+        }
+        (&Method::Get, "/vendor/github-markdown.min.css") => {
+            build_response(VENDOR_GITHUB_MARKDOWN_CSS.to_string(), "text/css; charset=utf-8", 200)
+        }
+        (&Method::Get, "/vendor/highlightjs-github.min.css") => {
+            build_response(VENDOR_HIGHLIGHTJS_GITHUB_CSS.to_string(), "text/css; charset=utf-8", 200)
+        }
         (&Method::Get, "/api/state") => {
             let state = shared.state.lock().unwrap().clone();
             let checkout_path = shared.checkout_path.lock().unwrap().clone();
