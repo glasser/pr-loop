@@ -1,7 +1,7 @@
 // Reply to PR review threads via GitHub GraphQL API.
 // Posts comments with the Claude marker prefix.
 
-use crate::threads::CLAUDE_MARKER;
+use crate::threads::{CLAUDE_IN_PROGRESS_MARKER, CLAUDE_MARKER};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::process::Command;
@@ -195,9 +195,15 @@ fn resolve_thread_graphql(thread_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Format the message with the Claude marker prefix.
-pub fn format_claude_message(message: &str) -> String {
-    format!("{} {}", CLAUDE_MARKER, message)
+/// Format the message with the Claude marker prefix. When `in_progress` is
+/// true, uses the interim-acknowledgment marker instead of the final one.
+pub fn format_claude_message(message: &str, in_progress: bool) -> String {
+    let marker = if in_progress {
+        CLAUDE_IN_PROGRESS_MARKER
+    } else {
+        CLAUDE_MARKER
+    };
+    format!("{} {}", marker, message)
 }
 
 #[cfg(test)]
@@ -247,15 +253,23 @@ mod tests {
 
     #[test]
     fn format_message_adds_marker() {
-        let formatted = format_claude_message("Hello world");
+        let formatted = format_claude_message("Hello world", false);
         assert_eq!(formatted, "🤖 From Claude: Hello world");
     }
 
     #[test]
     fn format_message_multiline() {
-        let formatted = format_claude_message("Line 1\nLine 2");
+        let formatted = format_claude_message("Line 1\nLine 2", false);
         assert!(formatted.starts_with(CLAUDE_MARKER));
         assert!(formatted.contains("Line 1\nLine 2"));
+    }
+
+    #[test]
+    fn format_message_in_progress_adds_in_progress_marker() {
+        let formatted = format_claude_message("Looking into it", true);
+        assert!(formatted.starts_with(CLAUDE_IN_PROGRESS_MARKER));
+        assert!(!formatted.starts_with(CLAUDE_MARKER));
+        assert!(formatted.contains("Looking into it"));
     }
 
     #[test]

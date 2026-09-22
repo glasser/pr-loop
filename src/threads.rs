@@ -30,6 +30,18 @@ pub struct ReviewThread {
 /// The marker prefix that Claude uses when replying to threads.
 pub const CLAUDE_MARKER: &str = "🤖 From Claude:";
 
+/// The marker prefix Claude uses for a quick interim reply — an
+/// acknowledgment posted before the real fix is ready. Threads whose last
+/// comment carries this marker still count as needing a (final) response,
+/// so they aren't lost between `pr-loop` invocations.
+pub const CLAUDE_IN_PROGRESS_MARKER: &str = "🚧 From Claude (in progress):";
+
+/// Returns true if `body` was posted by Claude, whether a final reply or an
+/// in-progress acknowledgment.
+pub fn is_claude_body(body: &str) -> bool {
+    body.starts_with(CLAUDE_MARKER) || body.starts_with(CLAUDE_IN_PROGRESS_MARKER)
+}
+
 /// The markers used to indicate a thread should be preserved for human review.
 /// Threads containing either marker in any comment are ignored by the tool
 /// (not counted as actionable or unresolved) and preserved during thread cleanup.
@@ -50,15 +62,17 @@ impl ReviewThread {
         let index = self.comments.iter().position(|c| c.id == comment_id)?;
         let comments_after: Vec<_> = self.comments[index + 1..]
             .iter()
-            .filter(|c| !c.body.starts_with(CLAUDE_MARKER))
+            .filter(|c| !is_claude_body(&c.body))
             .cloned()
             .collect();
         Some(comments_after)
     }
 
-    /// Returns true if this thread needs a response from Claude.
+    /// Returns true if this thread needs a (final) response from Claude.
     /// A thread needs response if: it's unresolved AND the last comment
-    /// doesn't start with the Claude marker.
+    /// doesn't start with the Claude marker. An in-progress acknowledgment
+    /// does NOT satisfy this — it deliberately uses a different marker so
+    /// the thread keeps showing up as actionable until the real reply lands.
     pub fn needs_response(&self) -> bool {
         if self.is_resolved {
             return false;
@@ -83,14 +97,14 @@ impl ReviewThread {
         let claude_authors: std::collections::HashSet<&str> = self
             .comments
             .iter()
-            .filter(|c| c.body.starts_with(CLAUDE_MARKER))
+            .filter(|c| is_claude_body(&c.body))
             .map(|c| c.author.as_str())
             .collect();
 
         // Thread is pure-Claude if every comment is either Claude-marked OR from a Claude author
-        self.comments.iter().all(|c| {
-            c.body.starts_with(CLAUDE_MARKER) || claude_authors.contains(c.author.as_str())
-        })
+        self.comments
+            .iter()
+            .all(|c| is_claude_body(&c.body) || claude_authors.contains(c.author.as_str()))
     }
 
     /// Returns true if any comment in this thread contains a paperclip marker.
@@ -667,6 +681,24 @@ mod tests {
     }
 
     #[test]
+    fn thread_needs_response_last_from_claude_in_progress() {
+        // An interim ack doesn't count as a final response — the thread
+        // must keep showing up as actionable.
+        let thread = make_thread(
+            "T1",
+            false,
+            vec![
+                make_comment("reviewer", "Please fix this"),
+                make_comment(
+                    "claude-bot",
+                    &format!("{} Looking into it", CLAUDE_IN_PROGRESS_MARKER),
+                ),
+            ],
+        );
+        assert!(thread.needs_response());
+    }
+
+    #[test]
     fn thread_needs_response_empty() {
         let thread = ReviewThread {
             id: "T1".to_string(),
@@ -763,6 +795,24 @@ mod tests {
     }
 
     #[test]
+    fn is_pure_claude_in_progress_then_final_same_author() {
+        // An in-progress ack followed by the final reply from the same
+        // author is still pure-Claude.
+        let thread = make_thread(
+            "T1",
+            true,
+            vec![
+                make_comment(
+                    "claude-bot",
+                    &format!("{} Looking into it", CLAUDE_IN_PROGRESS_MARKER),
+                ),
+                make_comment("claude-bot", "🤖 From Claude: Fixed!"),
+            ],
+        );
+        assert!(thread.is_pure_claude());
+    }
+
+    #[test]
     fn is_pure_claude_empty_thread() {
         let thread = ReviewThread {
             id: "T1".to_string(),
@@ -853,6 +903,27 @@ mod tests {
         // Comments after C2 (the last one) should be empty
         let comments = thread.human_comments_after("C2").unwrap();
         assert!(comments.is_empty());
+    }
+
+    #[test]
+    fn human_comments_after_filters_in_progress() {
+        let thread = make_thread(
+            "T1",
+            false,
+            vec![
+                make_comment_with_id("C1", "reviewer", "First"),
+                make_comment_with_id(
+                    "C2",
+                    "claude-bot",
+                    &format!("{} Looking into it", CLAUDE_IN_PROGRESS_MARKER),
+                ),
+                make_comment_with_id("C3", "reviewer", "Any update?"),
+            ],
+        );
+
+        let comments = thread.human_comments_after("C1").unwrap();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].id, "C3");
     }
 
     #[test]

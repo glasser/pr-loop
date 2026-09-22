@@ -19,6 +19,18 @@ Run the pr-loop tool in unattended mode, responding to review comments and CI fa
 4. Commit your changes (as a new commit, not amending) and push
 5. Return to step 1
 
+## Interim Acknowledgments
+
+As soon as you've formed an initial thought on a comment but still need to do more research or work before you can actually address it, post a quick interim reply:
+
+```
+pr-loop reply --in-reply-to <comment_id> --message "Looking into this now." --in-progress
+```
+
+This lets a human who checks in on the PR know you've seen the comment and share your initial take, without waiting for the real fix. The thread will still show up as needing a response on your next loop iteration — `--in-progress` marks the reply as an ack, not a final answer, so it can't get lost. Once you've actually addressed the comment, reply again normally (without `--in-progress`) to close it out.
+
+Don't bother with an interim ack if you can address the comment immediately.
+
 ## Status Messages
 
 You can communicate your current status by passing `--status-message` to pr-loop:

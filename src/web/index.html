@@ -22,6 +22,8 @@
     --thread-bg: #f6f8fa;
     --claude-bg: #e6ebf1;
     --outdated: #ffd9a8;
+    --in-progress-bg: #ddf4ff;
+    --in-progress-fg: #0969da;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -38,6 +40,8 @@
       --thread-bg: #161b22;
       --claude-bg: #1d2430;
       --outdated: #553b1b;
+      --in-progress-bg: #0d2c47;
+      --in-progress-fg: #79c0ff;
     }
   }
   * { box-sizing: border-box; }
@@ -386,6 +390,10 @@
     background: var(--outdated);
     color: var(--fg);
   }
+  .thread-header .badge.in-progress {
+    background: var(--in-progress-bg);
+    color: var(--in-progress-fg);
+  }
   .thread-header .actions {
     margin-left: auto;
     display: flex;
@@ -475,6 +483,11 @@
     background: var(--claude-bg);
     border-bottom-color: transparent;
   }
+  .comment.claude-in-progress {
+    background: var(--in-progress-bg);
+    border-bottom-color: transparent;
+  }
+  .comment.claude-in-progress .comment-meta .author { color: var(--in-progress-fg); }
   /* github-markdown-css sets .markdown-body background to white by default —
      override so it inherits the surrounding comment's background. */
   .comment-body.markdown-body {
@@ -681,6 +694,8 @@ md.renderer.rules.fence = (tokens, idx, options, env, self) => {
 };
 
 const CLAUDE_MARKER_RE = /^🤖 From Claude:\s?/;
+const CLAUDE_IN_PROGRESS_MARKER_RE = /^🚧 From Claude \(in progress\):\s?/;
+const ANY_CLAUDE_MARKER_RE = /^(?:🤖 From Claude:|🚧 From Claude \(in progress\):)\s?/;
 
 /// Sort threads so threads that have at least one Claude comment float to
 /// the top (ordered by most-recent-Claude-comment, newest first), and
@@ -694,7 +709,7 @@ function sortThreads(threads) {
       const ts = c.created_at || null;
       if (ts) {
         if (!newestAny || ts > newestAny) newestAny = ts;
-        if (c.body && CLAUDE_MARKER_RE.test(c.body)) {
+        if (c.body && ANY_CLAUDE_MARKER_RE.test(c.body)) {
           if (!newestClaude || ts > newestClaude) newestClaude = ts;
         }
       }
@@ -786,17 +801,22 @@ function useTick(intervalMs) {
 function Comment({ c }) {
   const rawBody = c.body || '';
   const claudeMatch = rawBody.match(CLAUDE_MARKER_RE);
+  const inProgressMatch = !claudeMatch && rawBody.match(CLAUDE_IN_PROGRESS_MARKER_RE);
   const isClaude = !!claudeMatch;
-  const displayBody = isClaude ? rawBody.slice(claudeMatch[0].length) : rawBody;
+  const isClaudeInProgress = !!inProgressMatch;
+  const marker = claudeMatch || inProgressMatch;
+  const displayBody = marker ? rawBody.slice(marker[0].length) : rawBody;
   const bodyHtml = md.render(displayBody);
   const ago = relativeTime(c.created_at);
   return html`
-    <div class="comment ${isClaude ? 'claude' : ''}">
+    <div class="comment ${isClaude ? 'claude' : ''}${isClaudeInProgress ? 'claude-in-progress' : ''}">
       <div class="comment-meta">
         <span class="author">
           ${isClaude
             ? html`🤖 Claude <span class="via">via @${c.author}</span>`
-            : html`@${c.author}`}
+            : isClaudeInProgress
+              ? html`🚧 Claude (in progress) <span class="via">via @${c.author}</span>`
+              : html`@${c.author}`}
         </span>
         <span>·</span>
         ${c.url
@@ -871,6 +891,7 @@ function Thread({ thread, onPoke }) {
           ? html`<a class="location" href=${firstCommentUrl} target="_blank">${location}</a>`
           : html`<span class="location">${location}</span>`}
         ${thread.is_outdated && html`<span class="badge">outdated</span>`}
+        ${thread.is_in_progress && html`<span class="badge in-progress">in progress</span>`}
         <div class="actions">
           <button onClick=${doResolve} disabled=${resolving}>
             ${resolving ? 'Resolving…' : 'Resolve'}

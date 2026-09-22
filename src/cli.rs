@@ -74,6 +74,14 @@ pub enum Command {
         /// The message to post (will be prefixed with "🤖 From Claude:")
         #[arg(long)]
         message: String,
+
+        /// Post this as a quick interim acknowledgment rather than a final
+        /// reply. Use this when you want to let the human know you've seen
+        /// their comment before you've actually finished addressing it —
+        /// the thread will keep showing up as needing a response until you
+        /// reply again without this flag.
+        #[arg(long)]
+        in_progress: bool,
     },
 
     /// Mark the PR as ready for review.
@@ -263,9 +271,31 @@ mod tests {
             "Fixed the issue",
         ]);
         match cli.command {
-            Some(Command::Reply { in_reply_to, message }) => {
+            Some(Command::Reply { in_reply_to, message, in_progress }) => {
                 assert_eq!(in_reply_to, "PRRC_456");
                 assert_eq!(message, "Fixed the issue");
+                assert!(!in_progress);
+            }
+            _ => panic!("Expected Reply command"),
+        }
+    }
+
+    #[test]
+    fn parse_reply_command_in_progress() {
+        let cli = Cli::parse_from([
+            "pr-loop",
+            "reply",
+            "--in-reply-to",
+            "PRRC_456",
+            "--message",
+            "Looking into it",
+            "--in-progress",
+        ]);
+        match cli.command {
+            Some(Command::Reply { in_reply_to, message, in_progress }) => {
+                assert_eq!(in_reply_to, "PRRC_456");
+                assert_eq!(message, "Looking into it");
+                assert!(in_progress);
             }
             _ => panic!("Expected Reply command"),
         }

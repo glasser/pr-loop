@@ -16,7 +16,7 @@ use crate::commits::{CommitsClient, PrCommit, RealCommitsClient};
 use crate::git::{GitClient, RealGitClient};
 use crate::github::PrContext;
 use crate::reply::{RealReplyClient, ReplyClient};
-use crate::threads::CLAUDE_MARKER;
+use crate::threads::{CLAUDE_IN_PROGRESS_MARKER, CLAUDE_MARKER};
 use crate::threads::{RealThreadsClient, ReviewThread, ThreadComment, ThreadsClient};
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -72,6 +72,10 @@ struct ThreadDto {
     is_resolved: bool,
     is_outdated: bool,
     is_paperclip: bool,
+    /// True if the last comment is Claude's interim acknowledgment rather
+    /// than a final reply — the thread is being worked on but still needs
+    /// a real response.
+    is_in_progress: bool,
     path: Option<String>,
     line: Option<u64>,
     comments: Vec<CommentDto>,
@@ -84,6 +88,9 @@ impl From<&ReviewThread> for ThreadDto {
             is_resolved: t.is_resolved,
             is_outdated: t.is_outdated,
             is_paperclip: t.has_paperclip(),
+            is_in_progress: t
+                .last_comment()
+                .is_some_and(|c| c.body.starts_with(CLAUDE_IN_PROGRESS_MARKER)),
             path: t.path.clone(),
             line: t.line,
             comments: t.comments.iter().map(CommentDto::from).collect(),
@@ -690,6 +697,7 @@ mod tests {
             is_resolved: resolved,
             is_outdated: false,
             is_paperclip: paperclip,
+            is_in_progress: last_comment_body.starts_with(CLAUDE_IN_PROGRESS_MARKER),
             path: None,
             line: None,
             comments: vec![CommentDto {
@@ -727,6 +735,21 @@ mod tests {
         let info = peer_info(&shared);
         assert_eq!(info.unresolved_threads, 0);
         assert_eq!(info.needs_response, 0);
+    }
+
+    #[test]
+    fn peer_info_in_progress_ack_still_needs_response() {
+        let shared = shared_with_threads(vec![thread(
+            "t1",
+            false,
+            false,
+            &format!("{} Looking into it", CLAUDE_IN_PROGRESS_MARKER),
+        )]);
+
+        let info = peer_info(&shared);
+
+        assert_eq!(info.unresolved_threads, 1);
+        assert_eq!(info.needs_response, 1);
     }
 
     #[test]

@@ -233,7 +233,7 @@ fn main() {
     }
 
     match cli.command {
-        Some(Command::Reply { in_reply_to, message }) => {
+        Some(Command::Reply { in_reply_to, message, in_progress }) => {
             let reply_client = RealReplyClient;
             let threads_client = RealThreadsClient;
 
@@ -270,16 +270,25 @@ fn main() {
                 message.clone()
             };
 
-            let formatted_message = format_claude_message(&final_message);
+            let formatted_message = format_claude_message(&final_message, in_progress);
 
             println!(
-                "Replying to thread {} on {}/{}#{}",
-                thread_id, pr_context.owner, pr_context.repo, pr_context.pr_number
+                "Replying to thread {} on {}/{}#{}{}",
+                thread_id,
+                pr_context.owner,
+                pr_context.repo,
+                pr_context.pr_number,
+                if in_progress { " (interim ack)" } else { "" }
             );
 
             match reply_client.post_reply(&thread_id, &formatted_message) {
                 Ok(result) => {
                     println!("✓ Reply posted (comment ID: {})", result.comment_id);
+                    if in_progress {
+                        println!(
+                            "  Note: this thread will keep showing up as needing a response until you reply again without --in-progress."
+                        );
+                    }
 
                     // If there were newer comments, print them for the invoker
                     if !newer_comments.is_empty() {
