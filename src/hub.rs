@@ -9,6 +9,15 @@
 // once they go stale. There's no discovery step and no proxying: the hub
 // *is* the server for every tracked PR.
 //
+// A tracker can also spring up purely from a browser visit: if you load
+// `/pr/<owner>/<repo>/<pr>/` (or any sub-path under it) for a PR nobody has
+// registered, that request itself is treated as "someone cares about this"
+// and a tracker is created on the spot — see the per-PR route handling in
+// `handle()`. Every request through an existing tracker (page loads, the
+// `/api/state` poll, etc.) also refreshes its `last_seen`, so a PR stays
+// tracked for as long as a tab is open on it even if no `pr-loop` command is
+// ever run against it.
+//
 //   - Root `/` renders a chooser page listing all currently tracked PRs,
 //     each link going to `/pr/<owner>/<repo>/<pr>/`.
 //   - `/pr/<owner>/<repo>/<pr>/<rest>` is served in-process by that PR's
@@ -212,19 +221,11 @@ fn handle(mut request: tiny_http::Request, shared: &Arc<HubShared>) -> Result<()
         }
 
         let key = (pr.owner.clone(), pr.repo.clone(), pr.pr_number);
-        let tracker = shared.trackers.lock().unwrap().get(&key).cloned();
-        let Some(tracker) = tracker else {
-            let resp = Response::from_string(format!(
-                "No recent pr-loop activity for {}/{} #{}. Run any `pr-loop` command against \
-                 it (e.g. `pr-loop checks`) and refresh.",
-                pr.owner, pr.repo, pr.pr_number
-            ))
-            .with_status_code(404)
-            .with_header(content_type("text/plain"));
-            return request
-                .respond(resp)
-                .map_err(|e| anyhow::anyhow!("respond: {}", e));
-        };
+        let tracker = get_or_create_tracker(shared, &key, &pr);
+        // Any request through a tracker — a page load, `/api/state` polling,
+        // whatever — counts as "someone cares about this PR right now",
+        // same as a `pr-loop` invocation's register ping.
+        *tracker.last_seen.lock().unwrap() = Instant::now();
 
         let peers = snapshot_peers(shared, Some(&key));
         let ctx = RequestContext {
@@ -271,6 +272,31 @@ fn register(shared: &Arc<HubShared>, req: RegisterReq) {
             trackers.insert(key, tracker);
         }
     }
+}
+
+/// Return the tracker for `key`, spawning one on the spot if nobody has
+/// registered it yet. A direct page load is itself a signal that someone
+/// cares about this PR — no reason to make them go run a `pr-loop` command
+/// first just to get the hub to notice.
+fn get_or_create_tracker(shared: &Arc<HubShared>, key: &PrKey, pr: &PrRoute) -> Arc<Shared> {
+    let mut trackers = shared.trackers.lock().unwrap();
+    trackers
+        .entry(key.clone())
+        .or_insert_with(|| {
+            eprintln!(
+                "pr-loop hub: now tracking {}/{} #{} (from browser)",
+                pr.owner, pr.repo, pr.pr_number
+            );
+            let pr_context = PrContext {
+                owner: pr.owner.clone(),
+                repo: pr.repo.clone(),
+                pr_number: pr.pr_number,
+            };
+            // No real checkout path or Claude PID to offer — the git-ref
+            // and cc_status lookups that would use them already fail soft.
+            web::spawn_tracker(pr_context, PathBuf::new(), None)
+        })
+        .clone()
 }
 
 fn respond_json(request: tiny_http::Request, body: &str, status: u16) -> Result<()> {
@@ -695,6 +721,42 @@ mod tests {
         let html = render_none_page();
         assert!(html.contains("No"));
         assert!(html.contains("pr-loop"));
+    }
+
+    fn empty_hub_shared() -> Arc<HubShared> {
+        Arc::new(HubShared {
+            trackers: Mutex::new(HashMap::new()),
+            update_available: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    #[test]
+    fn get_or_create_tracker_spawns_when_missing() {
+        let shared = empty_hub_shared();
+        let pr = parse_pr_path("/pr/owner/repo/42/").unwrap();
+        let key = (pr.owner.clone(), pr.repo.clone(), pr.pr_number);
+
+        let tracker = get_or_create_tracker(&shared, &key, &pr);
+
+        assert_eq!(tracker.pr_context.owner, "owner");
+        assert_eq!(tracker.pr_context.repo, "repo");
+        assert_eq!(tracker.pr_context.pr_number, 42);
+        assert_eq!(shared.trackers.lock().unwrap().len(), 1);
+        tracker.request_stop();
+    }
+
+    #[test]
+    fn get_or_create_tracker_reuses_existing() {
+        let shared = empty_hub_shared();
+        let pr = parse_pr_path("/pr/owner/repo/42/").unwrap();
+        let key = (pr.owner.clone(), pr.repo.clone(), pr.pr_number);
+
+        let first = get_or_create_tracker(&shared, &key, &pr);
+        let second = get_or_create_tracker(&shared, &key, &pr);
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(shared.trackers.lock().unwrap().len(), 1);
+        first.request_stop();
     }
 
     #[test]
