@@ -465,6 +465,15 @@
     color: var(--muted);
     font-size: 12px;
     margin-top: 6px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .reword-modal .rewrap-btn {
+    margin-left: auto;
+    font-size: 11px;
+    padding: 2px 8px;
   }
   .reword-modal .actions {
     margin-top: 10px;
@@ -1247,6 +1256,55 @@ function CcStrip({ status }) {
   `;
 }
 
+const REWRAP_WIDTH = 72;
+
+// Emacs-style fill-paragraph: find the run of non-blank lines surrounding
+// `cursor`, collapse it to one string, and greedily re-wrap it to `width`
+// columns. Returns null if the cursor sits on a blank line — nothing to
+// wrap there.
+function rewrapParagraphAt(text, cursor, width = REWRAP_WIDTH) {
+  const lines = text.split('\n');
+  const lineStarts = [];
+  let offset = 0;
+  for (const line of lines) {
+    lineStarts.push(offset);
+    offset += line.length + 1;
+  }
+  let lineIdx = lines.length - 1;
+  for (let i = 0; i < lines.length; i++) {
+    if (cursor >= lineStarts[i] && cursor <= lineStarts[i] + lines[i].length) {
+      lineIdx = i;
+      break;
+    }
+  }
+  if (lines[lineIdx].trim() === '') return null;
+
+  let start = lineIdx;
+  while (start > 0 && lines[start - 1].trim() !== '') start--;
+  let end = lineIdx;
+  while (end < lines.length - 1 && lines[end + 1].trim() !== '') end++;
+
+  const words = lines.slice(start, end + 1).join(' ').split(/\s+/).filter(Boolean);
+  const wrapped = [];
+  let current = '';
+  for (const word of words) {
+    if (!current) {
+      current = word;
+    } else if ((current + ' ' + word).length <= width) {
+      current += ' ' + word;
+    } else {
+      wrapped.push(current);
+      current = word;
+    }
+  }
+  if (current) wrapped.push(current);
+
+  const newLines = [...lines.slice(0, start), ...wrapped, ...lines.slice(end + 1)];
+  const paragraphStartOffset = lineStarts[start];
+  const paragraphEndOffset = paragraphStartOffset + wrapped.join('\n').length;
+  return { text: newLines.join('\n'), cursor: paragraphEndOffset };
+}
+
 function Commit({ commit, isNew, onDismiss, onPoke }) {
   const ago = relativeTime(commit.committed_date);
   const author = commit.author_login || commit.author_name || '';
@@ -1261,10 +1319,24 @@ function Commit({ commit, isNew, onDismiss, onPoke }) {
   const [draft, setDraft] = useState(fullMessage);
   const [posting, setPosting] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const textareaRef = useRef(null);
 
   function startEdit() {
     setDraft(commit.pending_reword ?? fullMessage);
     setEditing(true);
+  }
+
+  function rewrapParagraph() {
+    const el = textareaRef.current;
+    if (!el) return;
+    const result = rewrapParagraphAt(draft, el.selectionStart);
+    if (!result) return;
+    setDraft(result.text);
+    // Restore focus/cursor after the value swap re-renders the textarea.
+    requestAnimationFrame(() => {
+      el.focus();
+      el.setSelectionRange(result.cursor, result.cursor);
+    });
   }
 
   async function submitReword() {
@@ -1323,15 +1395,20 @@ function Commit({ commit, isNew, onDismiss, onPoke }) {
             <h3>Edit commit message</h3>
             <div class="original-sha">Rewording <span class="sha">${commit.abbreviated_sha}</span> — Claude will apply this on its next loop iteration.</div>
             <textarea
+              ref=${textareaRef}
               autofocus
               value=${draft}
               onInput=${(e) => setDraft(e.target.value)}
               onKeyDown=${(e) => {
                 if (e.key === 'Escape') setEditing(false);
                 if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') submitReword();
+                if (e.altKey && e.key.toLowerCase() === 'q') { e.preventDefault(); rewrapParagraph(); }
               }}
             ></textarea>
-            <div class="hint">First line is the headline; leave a blank line before the body. Cmd/Ctrl+Enter to submit, Esc to cancel.</div>
+            <div class="hint">
+              First line is the headline; leave a blank line before the body. Cmd/Ctrl+Enter to submit, Esc to cancel.
+              <button type="button" class="rewrap-btn" onClick=${rewrapParagraph} title="Re-wrap the paragraph under the cursor to 72 columns (⌥Q)">¶ Rewrap paragraph</button>
+            </div>
             <div class="actions">
               <button class=${'primary' + (posting ? ' spin' : '')} onClick=${submitReword} disabled=${posting || !draft.trim()}>
                 ${posting ? 'Requesting…' : 'Request reword'}
