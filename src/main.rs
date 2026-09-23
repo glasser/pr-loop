@@ -35,8 +35,8 @@ use commit_edits::{CommitEditsClient, RealCommitEditsClient};
 use credentials::{CredentialProvider, Credentials, RealCredentialProvider};
 use git::{GitClient, RealGitClient};
 use github::{
-    resolve_pr_context, MergeableClient, MergeableStatus, PrContext, RealGitHubClient,
-    RealMergeableClient,
+    resolve_pr_context, GitHubClient, MergeableClient, MergeableStatus, PrContext,
+    RealGitHubClient, RealMergeableClient,
 };
 use pr::{has_status_block, remove_status_block, update_body_with_status, PrClient, RealPrClient};
 use reply::{format_claude_message, RealReplyClient, ReplyClient};
@@ -336,6 +336,13 @@ fn main() {
         }
 
         Some(Command::Ready { preserve_claude_threads, reviewer, expected_commits }) => {
+            let my_login = match gh_client.current_user() {
+                Ok(login) => login,
+                Err(e) => {
+                    eprintln!("Error: Failed to determine authenticated GitHub user: {}", e);
+                    std::process::exit(1);
+                }
+            };
             run_ready_command(
                 &pr_client,
                 &pr_context,
@@ -344,6 +351,7 @@ fn main() {
                 preserve_claude_threads,
                 &reviewer,
                 expected_commits,
+                &my_login,
             );
         }
 
@@ -377,6 +385,17 @@ fn main() {
             let git_client = RealGitClient;
             let mergeable_client = RealMergeableClient;
 
+            // Only engage with threads the current GitHub user started —
+            // someone else's (or a bot's) thread is left for a human, even
+            // if the user later joined it.
+            let my_login = match gh_client.current_user() {
+                Ok(login) => login,
+                Err(e) => {
+                    eprintln!("Error: Failed to determine authenticated GitHub user: {}", e);
+                    std::process::exit(1);
+                }
+            };
+
             // If --wait-until-actionable, poll until something needs attention
             if cli.wait_until_actionable {
                 match wait_until_actionable(
@@ -390,6 +409,7 @@ fn main() {
                     &cli.exclude_checks,
                     cli.timeout,
                     cli.poll_interval,
+                    &my_login,
                 ) {
                     Ok(WaitResult::Actionable) => {
                         eprintln!("PR is now actionable.");
@@ -424,6 +444,7 @@ fn main() {
                     cli.timeout,
                     cli.poll_interval,
                     cli.min_wait_after_push,
+                    &my_login,
                 ) {
                     Ok(WaitResult::Actionable) => {
                         eprintln!("PR is now actionable.");
@@ -487,7 +508,7 @@ fn main() {
             };
 
             // Analyze and output recommendation
-            let action = analyze_pr(&checks_summary, threads, pending_reword_requests);
+            let action = analyze_pr(&checks_summary, threads, pending_reword_requests, &my_login);
 
             // If there are CI failures, fetch logs. fetch_ci_failure_info
             // handles the no-CircleCI-token case internally; GitHub Actions
@@ -1169,6 +1190,7 @@ fn run_ready_command(
     preserve_claude_threads: bool,
     reviewers: &[String],
     expected_commits: Option<u64>,
+    my_login: &str,
 ) {
     let checks_client = RealChecksClient;
     let threads_client = RealThreadsClient;
@@ -1252,6 +1274,7 @@ fn run_ready_command(
         pr_context.pr_number,
         include_checks,
         exclude_checks,
+        my_login,
     ) {
         Ok(s) => s,
         Err(e) => {
@@ -1260,10 +1283,12 @@ fn run_ready_command(
         }
     };
 
-    // Check for unresolved threads (ALL threads must be resolved, not just non-actionable)
+    // Check for unresolved threads I started (not just non-actionable ones —
+    // even a thread whose last reply is mine still needs the human to resolve
+    // it). Threads other people started aren't mine to gate on.
     if !snapshot.unresolved_thread_ids.is_empty() {
         eprintln!(
-            "Error: PR has {} unresolved review thread(s). All threads must be resolved before marking ready.",
+            "Error: PR has {} unresolved review thread(s) you started. Those must be resolved before marking ready.",
             snapshot.unresolved_thread_ids.len()
         );
         std::process::exit(1);

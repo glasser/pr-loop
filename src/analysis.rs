@@ -40,8 +40,9 @@ pub fn analyze_pr(
     checks: &ChecksSummary,
     threads: Vec<ReviewThread>,
     pending_reword_requests: Vec<CommitEditRequest>,
+    my_login: &str,
 ) -> NextAction {
-    let actionable_threads = find_actionable_threads(threads);
+    let actionable_threads = find_actionable_threads(threads, my_login);
     let failed_checks = checks.failed();
     let pending_checks = checks.pending();
 
@@ -125,7 +126,7 @@ mod tests {
         };
         let threads = vec![]; // No threads
 
-        match analyze_pr(&checks, threads, vec![]) {
+        match analyze_pr(&checks, threads, vec![], "reviewer") {
             NextAction::PrReady => {}
             other => panic!("Expected PrReady, got {:?}", other),
         }
@@ -142,7 +143,7 @@ mod tests {
             vec![make_comment("reviewer", "Looks good!")],
         )];
 
-        match analyze_pr(&checks, threads, vec![]) {
+        match analyze_pr(&checks, threads, vec![], "reviewer") {
             NextAction::PrReady => {}
             other => panic!("Expected PrReady, got {:?}", other),
         }
@@ -159,7 +160,7 @@ mod tests {
             vec![make_comment("reviewer", "Please fix this")],
         )];
 
-        match analyze_pr(&checks, threads, vec![]) {
+        match analyze_pr(&checks, threads, vec![], "reviewer") {
             NextAction::RespondToComments {
                 threads,
                 also_has_ci_failures,
@@ -184,7 +185,7 @@ mod tests {
             vec![make_comment("reviewer", "Question?")],
         )];
 
-        match analyze_pr(&checks, threads, vec![]) {
+        match analyze_pr(&checks, threads, vec![], "reviewer") {
             NextAction::RespondToComments {
                 also_has_ci_failures,
                 ..
@@ -205,7 +206,7 @@ mod tests {
         };
         let threads = vec![]; // No actionable threads
 
-        match analyze_pr(&checks, threads, vec![]) {
+        match analyze_pr(&checks, threads, vec![], "reviewer") {
             NextAction::FixCiFailures { failed_check_names } => {
                 assert_eq!(failed_check_names, vec!["test"]);
             }
@@ -223,7 +224,7 @@ mod tests {
         };
         let threads = vec![];
 
-        match analyze_pr(&checks, threads, vec![]) {
+        match analyze_pr(&checks, threads, vec![], "reviewer") {
             NextAction::WaitForCi { pending_check_names } => {
                 assert_eq!(pending_check_names, vec!["test"]);
             }
@@ -243,7 +244,7 @@ mod tests {
             vec![make_comment("reviewer", "Fix this")],
         )];
 
-        match analyze_pr(&checks, threads, vec![]) {
+        match analyze_pr(&checks, threads, vec![], "reviewer") {
             NextAction::RespondToComments { .. } => {}
             other => panic!("Expected RespondToComments, got {:?}", other),
         }
@@ -260,7 +261,7 @@ mod tests {
         };
         let threads = vec![];
 
-        match analyze_pr(&checks, threads, vec![]) {
+        match analyze_pr(&checks, threads, vec![], "reviewer") {
             NextAction::FixCiFailures { .. } => {}
             other => panic!("Expected FixCiFailures, got {:?}", other),
         }
@@ -278,7 +279,7 @@ mod tests {
             vec![make_comment("reviewer", ":paperclip: For human review only")],
         )];
 
-        match analyze_pr(&checks, threads, vec![]) {
+        match analyze_pr(&checks, threads, vec![], "reviewer") {
             NextAction::PrReady => {}
             other => panic!("Expected PrReady, got {:?}", other),
         }
@@ -302,7 +303,34 @@ mod tests {
             ),
         ];
 
-        match analyze_pr(&checks, threads, vec![]) {
+        match analyze_pr(&checks, threads, vec![], "reviewer") {
+            NextAction::RespondToComments { threads, .. } => {
+                assert_eq!(threads.len(), 1);
+                assert_eq!(threads[0].thread.id, "T2");
+            }
+            other => panic!("Expected RespondToComments, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn analyze_ignores_threads_not_started_by_me() {
+        let checks = ChecksSummary {
+            checks: vec![make_check("build", CheckStatus::Pass)],
+        };
+        let threads = vec![
+            make_thread(
+                "T1",
+                false,
+                vec![make_comment("someone-else", "Please fix this")],
+            ),
+            make_thread(
+                "T2",
+                false,
+                vec![make_comment("glasser", "My own question")],
+            ),
+        ];
+
+        match analyze_pr(&checks, threads, vec![], "glasser") {
             NextAction::RespondToComments { threads, .. } => {
                 assert_eq!(threads.len(), 1);
                 assert_eq!(threads[0].thread.id, "T2");
@@ -333,7 +361,7 @@ mod tests {
         )];
         let reword_requests = vec![make_reword_request("abc123")];
 
-        match analyze_pr(&checks, threads, reword_requests) {
+        match analyze_pr(&checks, threads, reword_requests, "reviewer") {
             NextAction::RewordCommits { requests } => {
                 assert_eq!(requests.len(), 1);
                 assert_eq!(requests[0].sha, "abc123");
@@ -347,7 +375,7 @@ mod tests {
         let checks = ChecksSummary {
             checks: vec![make_check("build", CheckStatus::Pass)],
         };
-        match analyze_pr(&checks, vec![], vec![]) {
+        match analyze_pr(&checks, vec![], vec![], "reviewer") {
             NextAction::PrReady => {}
             other => panic!("Expected PrReady, got {:?}", other),
         }

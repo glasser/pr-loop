@@ -54,6 +54,7 @@ pub fn capture_snapshot(
     pr_number: u64,
     include_patterns: &[String],
     exclude_patterns: &[String],
+    my_login: &str,
 ) -> Result<PrSnapshot> {
     // Fetch checks
     let checks = checks_client.fetch_checks(owner, repo, pr_number).unwrap_or_default();
@@ -82,18 +83,20 @@ pub fn capture_snapshot(
         .filter(|t| !t.has_paperclip())
         .collect();
 
-    // All unresolved threads (regardless of who commented last)
+    // All unresolved threads that I started (regardless of who commented last).
+    // Threads other people started are someone else's conversation — `ready`
+    // shouldn't block on those being resolved.
     let unresolved_thread_ids: HashSet<String> = threads
         .iter()
-        .filter(|t| !t.is_resolved)
+        .filter(|t| !t.is_resolved && t.started_by(my_login))
         .map(|t| t.id.clone())
         .collect();
 
-    // Actionable threads (unresolved AND last comment not from Claude)
+    // Actionable threads (unresolved, started by me, and last comment not from Claude).
     let actionable_thread_ids: HashSet<String> = threads
         .into_iter()
         .filter(|t| {
-            if t.is_resolved {
+            if t.is_resolved || !t.started_by(my_login) {
                 return false;
             }
             match t.comments.last() {
@@ -176,6 +179,7 @@ pub fn wait_until_actionable(
     exclude_patterns: &[String],
     timeout_secs: u64,
     poll_interval_secs: u64,
+    my_login: &str,
 ) -> Result<WaitResult> {
     let start = Instant::now();
     let timeout = Duration::from_secs(timeout_secs);
@@ -191,6 +195,7 @@ pub fn wait_until_actionable(
         pr_number,
         include_patterns,
         exclude_patterns,
+        my_login,
     )?;
 
     if snapshot.is_actionable() {
@@ -221,6 +226,7 @@ pub fn wait_until_actionable(
             pr_number,
             include_patterns,
             exclude_patterns,
+            my_login,
         )?;
 
         if snapshot.is_actionable() {
@@ -250,6 +256,7 @@ pub fn wait_until_actionable_or_happy(
     timeout_secs: u64,
     poll_interval_secs: u64,
     min_wait_after_push_secs: u64,
+    my_login: &str,
 ) -> Result<WaitResult> {
     let start = Instant::now();
     let timeout = Duration::from_secs(timeout_secs);
@@ -275,6 +282,7 @@ pub fn wait_until_actionable_or_happy(
             pr_number,
             include_patterns,
             exclude_patterns,
+            my_login,
         )?;
 
         // If actionable (comments or failures), return immediately
@@ -386,6 +394,7 @@ mod tests {
             1,
             &[],
             &[],
+            "reviewer",
         )
         .unwrap();
 
@@ -413,6 +422,7 @@ mod tests {
             1,
             &[],
             &[],
+            "reviewer",
         )
         .unwrap();
 
@@ -439,6 +449,7 @@ mod tests {
             1,
             &[],
             &[],
+            "reviewer",
         )
         .unwrap();
 
@@ -464,6 +475,7 @@ mod tests {
             1,
             &[],
             &[],
+            "reviewer",
         )
         .unwrap();
 
@@ -490,6 +502,7 @@ mod tests {
             1,
             &[],
             &[],
+            "reviewer",
         )
         .unwrap();
 
@@ -513,6 +526,7 @@ mod tests {
             1,
             &[],
             &[],
+            "reviewer",
         )
         .unwrap();
 
@@ -633,6 +647,7 @@ mod tests {
             1,
             &[],
             &[],
+            "reviewer",
         )
         .unwrap();
 
@@ -686,10 +701,55 @@ mod tests {
             1,
             &[],
             &[],
+            "reviewer",
         )
         .unwrap();
 
         assert!(snapshot.actionable_thread_ids.is_empty());
         assert!(snapshot.unresolved_thread_ids.is_empty());
+    }
+
+    #[test]
+    fn snapshot_ignores_unresolved_thread_started_by_someone_else() {
+        // A thread someone else started, still unresolved, shouldn't block
+        // `ready` — only conversations I started need to be resolved.
+        let checks_client = TestChecksClient {
+            checks: vec![make_check("build", CheckStatus::Pass)],
+        };
+        let threads_client = TestThreadsClient {
+            threads: vec![ReviewThread {
+                id: "T1".to_string(),
+                is_resolved: false,
+                is_outdated: false,
+                path: Some("test.rs".to_string()),
+                line: Some(1),
+                comments: vec![ThreadComment {
+                    id: "C1".to_string(),
+                    author: "someone-else".to_string(),
+                    body: "Their own question".to_string(),
+                    diff_hunk: None,
+                    url: None,
+                    created_at: None,
+                }],
+            }],
+        };
+
+        let commit_edits_client = TestCommitEditsClient::default();
+        let snapshot = capture_snapshot(
+            &checks_client,
+            &threads_client,
+            &commit_edits_client,
+            "owner",
+            "repo",
+            1,
+            &[],
+            &[],
+            "reviewer",
+        )
+        .unwrap();
+
+        assert!(snapshot.actionable_thread_ids.is_empty());
+        assert!(snapshot.unresolved_thread_ids.is_empty());
+        assert!(snapshot.is_happy());
     }
 }

@@ -21,6 +21,11 @@ pub trait GitHubClient {
 
     /// Detect the PR number for the current branch.
     fn detect_pr(&self, owner: &str, repo: &str) -> Result<u64>;
+
+    /// The login of the currently authenticated GitHub user (i.e. "me").
+    /// Used to tell threads the user started from threads other people (or
+    /// bots) started, so pr-loop only engages with the former.
+    fn current_user(&self) -> Result<String>;
 }
 
 /// Real GitHub client that uses the `gh` CLI.
@@ -33,6 +38,10 @@ impl GitHubClient for RealGitHubClient {
 
     fn detect_pr(&self, owner: &str, repo: &str) -> Result<u64> {
         detect_pr_from_gh(owner, repo)
+    }
+
+    fn current_user(&self) -> Result<String> {
+        fetch_current_user_from_gh()
     }
 }
 
@@ -87,6 +96,32 @@ fn detect_pr_from_gh(_owner: &str, _repo: &str) -> Result<u64> {
         serde_json::from_slice(&output.stdout).context("Failed to parse gh pr view output")?;
 
     Ok(view.number)
+}
+
+#[derive(Deserialize)]
+struct GhUser {
+    login: String,
+}
+
+/// Fetch the authenticated user's login using `gh api user`.
+fn fetch_current_user_from_gh() -> Result<String> {
+    let output = Command::new("gh")
+        .args(["api", "user"])
+        .output()
+        .context("Failed to run 'gh api user'")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "Failed to determine authenticated GitHub user: {}",
+            stderr.trim()
+        );
+    }
+
+    let user: GhUser =
+        serde_json::from_slice(&output.stdout).context("Failed to parse gh api user output")?;
+
+    Ok(user.login)
 }
 
 /// Whether a PR has merge conflicts.
@@ -207,6 +242,7 @@ mod tests {
     pub struct TestGitHubClient {
         pub repo: Option<(String, String)>,
         pub pr_number: Option<u64>,
+        pub login: Option<String>,
     }
 
     impl GitHubClient for TestGitHubClient {
@@ -219,6 +255,12 @@ mod tests {
         fn detect_pr(&self, _owner: &str, _repo: &str) -> Result<u64> {
             self.pr_number
                 .ok_or_else(|| anyhow::anyhow!("No PR configured in test"))
+        }
+
+        fn current_user(&self) -> Result<String> {
+            self.login
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("No login configured in test"))
         }
     }
 
@@ -236,10 +278,31 @@ mod tests {
     }
 
     #[test]
+    fn current_user_returns_configured_login() {
+        let client = TestGitHubClient {
+            repo: None,
+            pr_number: None,
+            login: Some("glasser".to_string()),
+        };
+        assert_eq!(client.current_user().unwrap(), "glasser");
+    }
+
+    #[test]
+    fn current_user_errors_when_unconfigured() {
+        let client = TestGitHubClient {
+            repo: None,
+            pr_number: None,
+            login: None,
+        };
+        assert!(client.current_user().is_err());
+    }
+
+    #[test]
     fn resolve_with_all_args() {
         let client = TestGitHubClient {
             repo: None,
             pr_number: None,
+            login: None,
         };
 
         let ctx = resolve_pr_context(&client, Some("owner/repo"), Some(42)).unwrap();
@@ -253,6 +316,7 @@ mod tests {
         let client = TestGitHubClient {
             repo: Some(("detected-owner".to_string(), "detected-repo".to_string())),
             pr_number: Some(123),
+            login: None,
         };
 
         let ctx = resolve_pr_context(&client, None, None).unwrap();
@@ -266,6 +330,7 @@ mod tests {
         let client = TestGitHubClient {
             repo: Some(("detected-owner".to_string(), "detected-repo".to_string())),
             pr_number: Some(999),
+            login: None,
         };
 
         // Repo from arg, PR from detection

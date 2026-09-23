@@ -119,6 +119,15 @@ impl ReviewThread {
     pub fn comment_ids(&self) -> Vec<&str> {
         self.comments.iter().map(|c| c.id.as_str()).collect()
     }
+
+    /// Returns true if `login` posted this thread's first comment, i.e.
+    /// started the conversation. GitHub logins are case-insensitive.
+    /// Empty threads are considered not started by anyone.
+    pub fn started_by(&self, login: &str) -> bool {
+        self.comments
+            .first()
+            .is_some_and(|c| c.author.eq_ignore_ascii_case(login))
+    }
 }
 
 /// A thread that needs a response, with additional context for display.
@@ -139,11 +148,13 @@ impl ActionableThread {
 }
 
 /// Find all threads that need a response from Claude.
-/// Threads with the paperclip marker are excluded (preserved for human review).
-pub fn find_actionable_threads(threads: Vec<ReviewThread>) -> Vec<ActionableThread> {
+/// Threads with the paperclip marker are excluded (preserved for human review),
+/// as are threads that `my_login` didn't start — someone else's (or a bot's)
+/// thread is left alone even if others besides the starter have joined it.
+pub fn find_actionable_threads(threads: Vec<ReviewThread>, my_login: &str) -> Vec<ActionableThread> {
     threads
         .into_iter()
-        .filter(|t| !t.has_paperclip() && t.needs_response())
+        .filter(|t| !t.has_paperclip() && t.needs_response() && t.started_by(my_login))
         .map(|thread| ActionableThread { thread })
         .collect()
 }
@@ -724,7 +735,7 @@ mod tests {
             make_thread("T4", false, vec![make_comment("reviewer", "Another question")]),
         ];
 
-        let actionable = find_actionable_threads(threads);
+        let actionable = find_actionable_threads(threads, "reviewer");
         assert_eq!(actionable.len(), 2);
         assert_eq!(actionable[0].thread.id, "T1");
         assert_eq!(actionable[1].thread.id, "T4");
@@ -1027,7 +1038,7 @@ mod tests {
             make_thread("T3", false, vec![make_comment("reviewer", "Another issue")]),
         ];
 
-        let actionable = find_actionable_threads(threads);
+        let actionable = find_actionable_threads(threads, "reviewer");
         assert_eq!(actionable.len(), 2);
         assert_eq!(actionable[0].thread.id, "T1");
         assert_eq!(actionable[1].thread.id, "T3");
@@ -1045,7 +1056,67 @@ mod tests {
             ],
         )];
 
-        let actionable = find_actionable_threads(threads);
+        let actionable = find_actionable_threads(threads, "reviewer");
         assert!(actionable.is_empty());
+    }
+
+    #[test]
+    fn started_by_matches_first_comment_author() {
+        let thread = make_thread(
+            "T1",
+            false,
+            vec![
+                make_comment("glasser", "Please fix this"),
+                make_comment("bot", "I have thoughts too"),
+            ],
+        );
+        assert!(thread.started_by("glasser"));
+        assert!(!thread.started_by("bot"));
+    }
+
+    #[test]
+    fn started_by_is_case_insensitive() {
+        let thread = make_thread("T1", false, vec![make_comment("Glasser", "Please fix this")]);
+        assert!(thread.started_by("glasser"));
+        assert!(thread.started_by("GLASSER"));
+    }
+
+    #[test]
+    fn started_by_empty_thread_is_false() {
+        let thread = ReviewThread {
+            id: "T1".to_string(),
+            is_resolved: false,
+            is_outdated: false,
+            path: None,
+            line: None,
+            comments: vec![],
+        };
+        assert!(!thread.started_by("glasser"));
+    }
+
+    #[test]
+    fn find_actionable_threads_skips_threads_started_by_someone_else() {
+        let threads = vec![
+            make_thread("T1", false, vec![make_comment("glasser", "My question")]),
+            make_thread(
+                "T2",
+                false,
+                vec![
+                    make_comment("reviewer", "Someone else's question"),
+                    make_comment("glasser", "I have opinions on this too"),
+                ],
+            ),
+            make_thread(
+                "T3",
+                false,
+                vec![make_comment("dependabot[bot]", "Automated nit")],
+            ),
+        ];
+
+        // T1 is mine, T2 was started by someone else (even though I joined
+        // in), and T3 was started by a bot — only T1 is actionable.
+        let actionable = find_actionable_threads(threads, "glasser");
+        assert_eq!(actionable.len(), 1);
+        assert_eq!(actionable[0].thread.id, "T1");
     }
 }
