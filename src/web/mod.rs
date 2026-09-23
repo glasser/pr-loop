@@ -812,6 +812,9 @@ pub fn watch_binary_mtime(exe: PathBuf, original_mtime: SystemTime, update_avail
 }
 
 #[cfg(test)]
+mod browser_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

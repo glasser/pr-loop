@@ -40,3 +40,7 @@ serial_test = "3"
 
 # GraphQL schema validation
 apollo-compiler = "1"
+
+# Browser-driven web UI tests (src/web/browser_tests.rs). `fetch` downloads
+# and caches a pinned Chromium build instead of depending on a system Chrome.
+headless_chrome = { version = "1.0.22", features = ["fetch"] }

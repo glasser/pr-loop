@@ -23,6 +23,11 @@ This is a standard single-crate Rust project:
 - Design with dependency injection: API clients should be traits with real and test implementations.
 - Use recorded fixtures or constructed test data, not live API calls in tests.
 - Manual QA against the test repo informs what mock behavior to implement.
+- Browser-level web UI tests (`src/web/browser_tests.rs`, using `headless_chrome`) are `#[ignore]`d by
+  default so `cargo test` stays fast and offline. Run them with
+  `cargo test browser_tests -- --ignored` when changing `src/web/index.html` or `src/web/mod.rs`'s
+  routing — some bugs (e.g. keyboard-event handling) only show up in a real DOM/browser, not in Rust
+  unit tests. First run downloads and caches a pinned Chromium build (the `fetch` feature).
 
 ### Build Requirements
 - **Always build release when completing work**: `cargo build --release`
