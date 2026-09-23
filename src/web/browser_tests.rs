@@ -18,8 +18,33 @@
 
 use super::*;
 use headless_chrome::protocol::cdp::Input;
-use headless_chrome::Browser;
+use headless_chrome::{Browser, Element, Tab};
 use std::net::TcpListener;
+
+/// `navigate_to` + `wait_for_element` in one call, retrying the whole
+/// navigation a couple of times on failure. `headless_chrome`/CDP session
+/// setup has some inherent one-shot flakiness around a freshly created tab's
+/// very first navigation (independent of anything in the app — observed
+/// with no JS exception and no failed network request on the failing
+/// attempt), so a fresh `navigate_to` retry is more reliable here than
+/// leaning harder on a single `wait_for_element`'s internal polling.
+fn navigate_and_wait_for<'a>(tab: &'a Tab, url: &str, selector: &str) -> Element<'a> {
+    let mut last_err = None;
+    for attempt in 0..3 {
+        if attempt > 0 {
+            thread::sleep(Duration::from_millis(300));
+        }
+        tab.navigate_to(url).expect("navigate");
+        match tab.wait_for_element(selector) {
+            Ok(el) => return el,
+            Err(e) => last_err = Some(e),
+        }
+    }
+    panic!(
+        "never found {selector:?} at {url} after retries: {:?}",
+        last_err.unwrap()
+    );
+}
 
 /// Serves `state` from a fresh in-process HTTP server (no GitHub calls — the
 /// state is a fixture, and there's no poll loop) and returns its base URL.
@@ -58,6 +83,19 @@ fn start_test_server(state: State) -> String {
     });
 
     format!("http://127.0.0.1:{port}/")
+}
+
+fn pr_dto(state: &'static str, is_draft: bool, is_in_merge_queue: bool) -> PrDto {
+    PrDto {
+        owner: "glasser".to_string(),
+        repo: "pr-loop-test-repo".to_string(),
+        pr_number: 1,
+        title: Some("Test PR".to_string()),
+        url: None,
+        state,
+        is_draft,
+        is_in_merge_queue,
+    }
 }
 
 fn one_commit_state(message_body: &str) -> State {
@@ -149,15 +187,7 @@ fn option_q_rewraps_paragraph_and_confirms_hooks_work() {
         "launch/fetch Chromium — see the `fetch` feature on the headless_chrome dev-dependency",
     );
     let tab = browser.new_tab().expect("open tab");
-    tab.navigate_to(&base).expect("navigate");
-
-    // Deliberately not `wait_until_navigated()` first — in practice that call
-    // itself proved to be the flaky part (its own event-based wait can hang
-    // even on a successful load). `wait_for_element` already retries on its
-    // own for up to its timeout, which covers the same "page not loaded yet"
-    // case more reliably.
-    tab.wait_for_element(".edit-btn")
-        .expect("edit button should render")
+    navigate_and_wait_for(&tab, &base, ".edit-btn")
         .click()
         .expect("click edit button");
 
@@ -253,5 +283,140 @@ fn option_q_rewraps_paragraph_and_confirms_hooks_work() {
     assert!(
         value.lines().all(|l| l.chars().count() <= 72),
         "rewrapped lines should fit in 72 columns — got:\n{value}"
+    );
+}
+
+/// The badge is pure rendering logic (github.com-style icon/label from
+/// `pr.state` + `is_draft` + `is_in_merge_queue`), so this could in principle
+/// be a Rust unit test if that logic lived in Rust — it doesn't, it's inline
+/// JS in index.html, so a browser is the only way to actually exercise it.
+#[test]
+#[ignore = "spawns a real headless Chrome; run with `cargo test browser_tests -- --ignored`"]
+fn pr_status_badge_renders_for_each_state() {
+    let browser = Browser::default().expect("launch/fetch Chromium");
+
+    let cases = [
+        ("open", false, false, "open", "Open"),
+        ("open", true, false, "draft", "Draft"),
+        ("open", false, true, "queued", "Queued to merge"),
+        ("closed", false, false, "closed", "Closed"),
+        ("merged", false, false, "merged", "Merged"),
+    ];
+
+    for (pr_state, is_draft, is_in_merge_queue, expected_class, expected_label) in cases {
+        let base = start_test_server(State {
+            pr: Some(pr_dto(pr_state, is_draft, is_in_merge_queue)),
+            ..Default::default()
+        });
+
+        let tab = browser.new_tab().expect("open tab");
+        let badge = navigate_and_wait_for(&tab, &base, ".pr-status");
+
+        let class = badge.get_attribute_value("class").unwrap().unwrap_or_default();
+        let text = badge.get_inner_text().unwrap();
+
+        assert!(
+            class.split(' ').any(|c| c == expected_class),
+            "state={pr_state} draft={is_draft} queued={is_in_merge_queue}: class was {class:?}, expected to contain {expected_class:?}"
+        );
+        assert!(
+            text.contains(expected_label),
+            "state={pr_state} draft={is_draft} queued={is_in_merge_queue}: text was {text:?}, expected to contain {expected_label:?}"
+        );
+
+        tab.close(false).ok();
+    }
+}
+
+/// Escape is not subject to the OS key-composition quirk that
+/// `option_q_rewraps_paragraph_and_confirms_hooks_work` guards against, so
+/// the crate's high-level `press_key` (unlike a Mac Option+letter) is a
+/// faithful stand-in for a real keypress here.
+#[test]
+#[ignore = "spawns a real headless Chrome; run with `cargo test browser_tests -- --ignored`"]
+fn escape_closes_reword_modal_without_saving() {
+    let base = start_test_server(one_commit_state("Some commit body."));
+
+    let browser = Browser::default().expect("launch/fetch Chromium");
+    let tab = browser.new_tab().expect("open tab");
+    navigate_and_wait_for(&tab, &base, ".edit-btn")
+        .click()
+        .expect("click edit button");
+    let textarea = tab
+        .wait_for_element(".reword-modal textarea")
+        .expect("modal should open");
+    textarea.focus().expect("focus textarea");
+
+    tab.press_key("Escape").expect("press Escape");
+    thread::sleep(Duration::from_millis(150));
+
+    let modal_gone: bool = tab
+        .evaluate("!document.querySelector('.reword-modal')", false)
+        .expect("evaluate")
+        .value
+        .and_then(|v| v.as_bool())
+        .expect("boolean result");
+    assert!(modal_gone, "Escape should close the reword modal");
+
+    // No pending-reword request should have been created — Escape cancels,
+    // it doesn't submit. (No network call happens either way here since we
+    // never clicked "Request reword", but this also guards against a future
+    // change accidentally wiring Escape to submit.)
+    let pending_reword_shown: bool = tab
+        .evaluate("!!document.querySelector('.reword-pending')", false)
+        .expect("evaluate")
+        .value
+        .and_then(|v| v.as_bool())
+        .expect("boolean result");
+    assert!(!pending_reword_shown, "Escape must not create a reword request");
+}
+
+/// Confirms the vendored markdown-it + markdown-it-emoji + highlight.js
+/// bundle actually still renders correctly end-to-end (fenced code gets
+/// syntax-highlighted, emoji shortcodes get replaced) — nothing else tests
+/// that these libraries still *work*, only that their files are servable
+/// (`vendor_assets_are_served`).
+#[test]
+#[ignore = "spawns a real headless Chrome; run with `cargo test browser_tests -- --ignored`"]
+fn comment_body_renders_markdown_emoji_and_code_highlighting() {
+    let state = State {
+        pr: Some(pr_dto("open", false, false)),
+        threads: vec![ThreadDto {
+            id: "thread-1".to_string(),
+            is_resolved: false,
+            is_outdated: false,
+            is_paperclip: false,
+            is_in_progress: false,
+            path: None,
+            line: None,
+            comments: vec![CommentDto {
+                id: "comment-1".to_string(),
+                author: "octocat".to_string(),
+                body: "Nice work :tada:\n\n```rust\nfn main() {}\n```".to_string(),
+                diff_hunk: None,
+                url: None,
+                created_at: None,
+            }],
+        }],
+        ..Default::default()
+    };
+    let base = start_test_server(state);
+
+    let browser = Browser::default().expect("launch/fetch Chromium");
+    let tab = browser.new_tab().expect("open tab");
+    let body = navigate_and_wait_for(&tab, &base, ".comment-body");
+    let html = body.get_content().expect("get rendered HTML");
+
+    assert!(
+        html.contains('🎉'),
+        "markdown-it-emoji should replace :tada: with 🎉 — got:\n{html}"
+    );
+    assert!(
+        html.contains("hljs language-rust"),
+        "fenced rust code should be routed through the highlight.js fence renderer — got:\n{html}"
+    );
+    assert!(
+        html.contains("hljs-"),
+        "highlight.js should emit at least one hljs-* token span — got:\n{html}"
     );
 }
