@@ -10,11 +10,9 @@
 // `headless_chrome`'s `fetch` Cargo feature (see Cargo.toml) downloads and
 // caches a pinned "known good" Chromium build the first time it's needed, so
 // these tests don't depend on whatever Chrome happens to be on the machine.
-// They're marked `#[ignore]` and excluded from the default `cargo test` run
-// (which stays fast and fully offline) — run them explicitly with:
-//
-//   cargo test --test '*' -- --ignored   # or just target this module:
-//   cargo test browser_tests -- --ignored
+// They run as part of the default `cargo test` — this project has no CI and
+// isn't developed often enough for a fast/offline default to matter more
+// than just running everything every time.
 
 use super::*;
 use headless_chrome::protocol::cdp::Input;
@@ -175,7 +173,6 @@ fn vendor_assets_are_served() {
 /// resolving to two separate module instances) would show up as the modal
 /// simply never appearing.
 #[test]
-#[ignore = "spawns a real headless Chrome; run with `cargo test browser_tests -- --ignored`"]
 fn option_q_rewraps_paragraph_and_confirms_hooks_work() {
     let base = start_test_server(one_commit_state(
         "Second paragraph here, also fairly long, to make sure paragraph boundary \
@@ -291,7 +288,6 @@ fn option_q_rewraps_paragraph_and_confirms_hooks_work() {
 /// be a Rust unit test if that logic lived in Rust — it doesn't, it's inline
 /// JS in index.html, so a browser is the only way to actually exercise it.
 #[test]
-#[ignore = "spawns a real headless Chrome; run with `cargo test browser_tests -- --ignored`"]
 fn pr_status_badge_renders_for_each_state() {
     let browser = Browser::default().expect("launch/fetch Chromium");
 
@@ -333,7 +329,6 @@ fn pr_status_badge_renders_for_each_state() {
 /// the crate's high-level `press_key` (unlike a Mac Option+letter) is a
 /// faithful stand-in for a real keypress here.
 #[test]
-#[ignore = "spawns a real headless Chrome; run with `cargo test browser_tests -- --ignored`"]
 fn escape_closes_reword_modal_without_saving() {
     let base = start_test_server(one_commit_state("Some commit body."));
 
@@ -377,7 +372,6 @@ fn escape_closes_reword_modal_without_saving() {
 /// that these libraries still *work*, only that their files are servable
 /// (`vendor_assets_are_served`).
 #[test]
-#[ignore = "spawns a real headless Chrome; run with `cargo test browser_tests -- --ignored`"]
 fn comment_body_renders_markdown_emoji_and_code_highlighting() {
     let state = State {
         pr: Some(pr_dto("open", false, false)),

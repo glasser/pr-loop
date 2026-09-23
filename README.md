@@ -91,13 +91,9 @@ The project validates all GraphQL queries against GitHub's schema at test time. 
 
 ## Web UI Browser Tests
 
-The web UI (`src/web/`) has a browser-driven test suite in `src/web/browser_tests.rs` that drives a real headless Chrome via the `headless_chrome` crate — some bugs (like keyboard-event handling) only show up in an actual browser, not in Rust unit tests. These are excluded from the default `cargo test`, which stays fast and fully offline; run them explicitly with:
+The web UI (`src/web/`) has a browser-driven test suite in `src/web/browser_tests.rs` that drives a real headless Chrome via the `headless_chrome` crate — some bugs (like keyboard-event handling) only show up in an actual browser, not in Rust unit tests. They run as part of the regular `cargo test`, no separate command needed; the first run downloads and caches a pinned Chromium build (via the `fetch` Cargo feature), so no system Chrome install is required, and each run after that takes ~20-30s longer than a Chrome-free test run since it launches a real browser several times.
 
-```bash
-cargo test browser_tests -- --ignored
-```
-
-The first run downloads and caches a pinned Chromium build (via the `fetch` Cargo feature), so no system Chrome install is required. The web UI's own JS/CSS dependencies (Preact, htm, markdown-it, highlight.js, etc.) are vendored into `src/web/vendor/` rather than loaded from a CDN — see `scripts/update-web-vendor.sh` (or `mise run web:update-vendor`) to refresh pinned versions.
+The web UI's own JS/CSS dependencies (Preact, htm, markdown-it, highlight.js, etc.) are vendored into `src/web/vendor/` rather than loaded from a CDN — see `scripts/update-web-vendor.sh` (or `mise run web:update-vendor`) to refresh pinned versions.
 
 ## License
 
