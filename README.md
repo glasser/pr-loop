@@ -89,6 +89,16 @@ Both skills require the PR to be in draft mode when using `--maintain-status`.
 
 The project validates all GraphQL queries against GitHub's schema at test time. Query files are in `graphql/operation/` and the schema is in `graphql/schema/`. The source code uses `include_str!` to load queries from these files, ensuring the validated queries are the same ones used at runtime.
 
+## Web UI Browser Tests
+
+The web UI (`src/web/`) has a browser-driven test suite in `src/web/browser_tests.rs` that drives a real headless Chrome via the `headless_chrome` crate — some bugs (like keyboard-event handling) only show up in an actual browser, not in Rust unit tests. These are excluded from the default `cargo test`, which stays fast and fully offline; run them explicitly with:
+
+```bash
+cargo test browser_tests -- --ignored
+```
+
+The first run downloads and caches a pinned Chromium build (via the `fetch` Cargo feature), so no system Chrome install is required. The web UI's own JS/CSS dependencies (Preact, htm, markdown-it, highlight.js, etc.) are vendored into `src/web/vendor/` rather than loaded from a CDN — see `scripts/update-web-vendor.sh` (or `mise run web:update-vendor`) to refresh pinned versions.
+
 ## License
 
 MIT
