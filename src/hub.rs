@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tiny_http::{Header, Method, Response, Server};
 
 const LAUNCHD_LABEL: &str = "local.pr-loop.hub";
@@ -70,6 +70,7 @@ pub fn run(binds: &[String], port: u16) -> Result<()> {
     let shared = Arc::new(HubShared {
         trackers: Mutex::new(HashMap::new()),
         update_available: Arc::new(AtomicBool::new(false)),
+        server_instance_id: new_server_instance_id(),
     });
 
     // Watch our own binary for rebuilds. Canonicalize so we follow symlinks
@@ -120,9 +121,23 @@ fn parse_socket_addr(host: &str, port: u16) -> Result<SocketAddr> {
         .with_context(|| format!("parse bind address {}", s))
 }
 
+/// A value that's different every time the hub process starts, including
+/// across `exec()`-based restarts (which keep the same PID) — used so a
+/// browser tab that loaded its page from a since-restarted process can tell
+/// its in-memory JS is now stale and prompt for a reload. Doesn't need to be
+/// unguessable, just distinct per run.
+fn new_server_instance_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{}-{}", std::process::id(), nanos)
+}
+
 struct HubShared {
     trackers: Mutex<HashMap<PrKey, Arc<Shared>>>,
     update_available: Arc<AtomicBool>,
+    server_instance_id: String,
 }
 
 /// Periodically drop trackers that haven't been re-registered recently, or
@@ -231,6 +246,7 @@ fn handle(mut request: tiny_http::Request, shared: &Arc<HubShared>) -> Result<()
         let ctx = RequestContext {
             update_available: shared.update_available.load(Ordering::Relaxed),
             peers: &peers,
+            server_instance_id: &shared.server_instance_id,
         };
         let sub_path = format!("/{}", pr.rest);
         return web::handle_request(request, &sub_path, &tracker, &ctx);
@@ -727,6 +743,7 @@ mod tests {
         Arc::new(HubShared {
             trackers: Mutex::new(HashMap::new()),
             update_available: Arc::new(AtomicBool::new(false)),
+            server_instance_id: "test-instance".to_string(),
         })
     }
 

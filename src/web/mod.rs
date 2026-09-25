@@ -30,6 +30,10 @@ use tiny_http::{Header, Method, Response};
 
 const INDEX_HTML: &str = include_str!("index.html");
 
+/// Substituted with the serving process's `server_instance_id` when `/` is
+/// requested — see `RequestContext::server_instance_id`.
+const SERVER_INSTANCE_ID_PLACEHOLDER: &str = "__PR_LOOP_SERVER_INSTANCE_ID__";
+
 // Browser JS/CSS deps, vendored (see scripts/update-web-vendor.sh) rather
 // than pulled from a CDN at runtime, and served below alongside the page.
 const VENDOR_PREACT_MJS: &str = include_str!("vendor/preact.mjs");
@@ -226,6 +230,11 @@ struct StateResponse<'a> {
     /// any — see `Shared::claude_pid`. Surfaced for debugging "why is this
     /// showing the wrong session".
     claude_pid: Option<u32>,
+    /// This process's instance id (see `RequestContext::server_instance_id`).
+    /// The client compares this against the id it captured when its page
+    /// was served — a mismatch means the hub has restarted since, so the
+    /// client's in-memory JS may no longer match the running backend.
+    server_instance_id: &'a str,
 }
 
 /// Per-PR tracker state, owned by the hub's tracker map. One of these exists
@@ -296,6 +305,12 @@ impl Shared {
 pub struct RequestContext<'a> {
     pub update_available: bool,
     pub peers: &'a [PeerInfo],
+    /// Distinct per hub process run (see `hub::new_server_instance_id`).
+    /// Embedded into the served page and echoed on `/api/state` so a
+    /// browser tab that's had a page open since before the hub last
+    /// restarted can tell its in-memory JS no longer matches what's
+    /// running, and prompt for a reload.
+    pub server_instance_id: &'a str,
 }
 
 /// Create a tracker for `pr_context` and spawn its background poll thread.
@@ -388,7 +403,14 @@ pub fn handle_request(
     let method = request.method().clone();
 
     let resp = match (&method, path) {
-        (&Method::Get, "/") => build_response(INDEX_HTML.to_string(), "text/html; charset=utf-8", 200),
+        (&Method::Get, "/") => {
+            // Stamp the served page with this process's instance id so the
+            // client can later notice (via /api/state) that it's talking to
+            // a different (restarted) process than the one that served it.
+            let body =
+                INDEX_HTML.replace(SERVER_INSTANCE_ID_PLACEHOLDER, ctx.server_instance_id);
+            build_response(body, "text/html; charset=utf-8", 200)
+        }
         (&Method::Get, "/vendor/preact.mjs") => {
             build_response(VENDOR_PREACT_MJS.to_string(), "text/javascript; charset=utf-8", 200)
         }
@@ -432,6 +454,7 @@ pub fn handle_request(
                 update_available: ctx.update_available,
                 checkout_path: checkout_path.to_string_lossy().into_owned(),
                 claude_pid,
+                server_instance_id: ctx.server_instance_id,
             };
             let body = serde_json::to_string(&response)?;
             build_response(body, "application/json", 200)

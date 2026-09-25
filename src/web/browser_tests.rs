@@ -48,7 +48,17 @@ fn navigate_and_wait_for<'a>(tab: &'a Tab, url: &str, selector: &str) -> Element
 /// state is a fixture, and there's no poll loop) and returns its base URL.
 /// The server thread runs for the rest of the process's life, which is fine:
 /// each test binds an OS-assigned port, and the test process exits when done.
+/// Uses a fixed `"test-instance"` server id — see
+/// `start_test_server_with_instance_id` for tests that need to change it
+/// mid-test (e.g. to simulate a hub restart).
 fn start_test_server(state: State) -> String {
+    start_test_server_with_instance_id(state, Arc::new(Mutex::new("test-instance".to_string())))
+}
+
+/// Like `start_test_server`, but the server's reported `server_instance_id`
+/// is read fresh from `instance_id` on every request, so a test can mutate
+/// it after the page has loaded to simulate the hub having restarted.
+fn start_test_server_with_instance_id(state: State, instance_id: Arc<Mutex<String>>) -> String {
     let shared = Arc::new(Shared {
         pr_context: PrContext {
             owner: "glasser".to_string(),
@@ -72,9 +82,11 @@ fn start_test_server(state: State) -> String {
         let empty_peers: Vec<PeerInfo> = Vec::new();
         for request in server.incoming_requests() {
             let path = request.url().split('?').next().unwrap_or("/").to_string();
+            let current_id = instance_id.lock().unwrap().clone();
             let ctx = RequestContext {
                 update_available: false,
                 peers: &empty_peers,
+                server_instance_id: &current_id,
             };
             let _ = handle_request(request, &path, &shared, &ctx);
         }
@@ -522,4 +534,63 @@ fn empty_state_clean_up_button_requires_a_second_click_to_confirm() {
         .wait_for_element(".cleanup-prompt button.danger")
         .expect("button still present after cancel");
     assert_eq!(disarmed.get_inner_text().unwrap().trim(), "Clean up 2");
+}
+
+/// No browser needed — this just confirms the server-side substitution that
+/// `reload_pill_appears_after_hub_restarts_since_page_load` (below) relies
+/// on: `/` is stamped with the serving process's instance id rather than
+/// leaking the raw placeholder to the client.
+#[test]
+fn index_html_is_stamped_with_the_server_instance_id() {
+    let base = start_test_server(State::default());
+    let resp = reqwest::blocking::get(&base).expect("request");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().expect("body");
+    assert!(
+        body.contains(r#"const SERVER_INSTANCE_ID = "test-instance";"#),
+        "index.html should have its instance-id placeholder substituted — got a body without it"
+    );
+    assert!(
+        !body.contains("__PR_LOOP_SERVER_INSTANCE_ID__"),
+        "the raw placeholder token must never reach the client"
+    );
+}
+
+/// Regression test for frontend/backend version skew: if the hub restarts
+/// while a tab is already open (detected via a changed `server_instance_id`
+/// on `/api/state`), the tab should offer a reload rather than silently
+/// keep running JS that may no longer match the server it's talking to.
+#[test]
+fn reload_pill_appears_after_hub_restarts_since_page_load() {
+    let instance_id = Arc::new(Mutex::new("instance-a".to_string()));
+    let base = start_test_server_with_instance_id(
+        State {
+            pr: Some(pr_dto("open", false, false)),
+            last_fetched_at: Some("2024-01-01T00:00:00Z".to_string()),
+            ..Default::default()
+        },
+        Arc::clone(&instance_id),
+    );
+
+    let browser = Browser::default().expect("launch/fetch Chromium");
+    let tab = browser.new_tab().expect("open tab");
+    navigate_and_wait_for(&tab, &base, "#header");
+
+    let reload_pill_text = |tab: &Tab| -> Option<String> {
+        tab.find_element(".restart-pill").ok().map(|el| el.get_inner_text().unwrap_or_default())
+    };
+    assert!(
+        reload_pill_text(&tab).is_none(),
+        "no reload prompt should show before the server's instance id ever changes"
+    );
+
+    *instance_id.lock().unwrap() = "instance-b".to_string();
+    // The page polls /api/state every 1s.
+    thread::sleep(Duration::from_millis(1300));
+
+    let text = reload_pill_text(&tab).expect("reload pill should appear once the instance id changes");
+    assert!(
+        text.to_lowercase().contains("reload"),
+        "pill should prompt a reload, not a restart, since no code update is pending — got {text:?}"
+    );
 }

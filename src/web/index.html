@@ -834,6 +834,13 @@ import hljs from './vendor/highlightjs.mjs';
 
 const html = htm.bind(h);
 
+// Substituted server-side (see SERVER_INSTANCE_ID_PLACEHOLDER in web/mod.rs)
+// with an id that's different every time the hub process (re)starts. If
+// /api/state ever reports a different id than this, the hub has restarted
+// since this page loaded, so this tab's in-memory JS may no longer match
+// the running backend — see ReloadPill.
+const SERVER_INSTANCE_ID = "__PR_LOOP_SERVER_INSTANCE_ID__";
+
 const md = new MarkdownIt({ html: false, linkify: true, breaks: true });
 md.use(markdownItEmoji);
 const origFence = md.renderer.rules.fence || ((t, i, o, e, s) => s.renderToken(t, i, o));
@@ -1183,6 +1190,19 @@ function RestartPill() {
   return html`
     <button class="restart-pill" onClick=${onClick} disabled=${clicked} title="pr-loop binary has been rebuilt — click to restart this server">
       ${clicked ? 'Restarting…' : 'pr-loop updated — restart'}
+    </button>
+  `;
+}
+
+/// The hub process has restarted since this tab loaded (see
+/// SERVER_INSTANCE_ID) — this tab's in-memory JS may not match what the
+/// server now expects. Unlike RestartPill this doesn't hit the server at
+/// all; a plain reload picks up the page the (already-running) server would
+/// serve now.
+function ReloadPill() {
+  return html`
+    <button class="restart-pill" onClick=${() => window.location.reload()} title="pr-loop server restarted since this page loaded — click to reload">
+      pr-loop restarted — reload page
     </button>
   `;
 }
@@ -1661,6 +1681,12 @@ function App() {
   }
 
   const connectionLost = failures >= 3;
+  // The hub restarted since this tab loaded — its in-memory JS may not
+  // match the running backend anymore. If a rebuilt-but-not-yet-restarted
+  // binary is *also* pending (update_available), that pill takes priority:
+  // restarting resolves both, and one restart happening right after another
+  // would just be confusing.
+  const frontendStale = !data.update_available && data.server_instance_id !== SERVER_INSTANCE_ID;
   const allUnresolved = (data.threads || []).filter(t => !t.is_resolved && !t.is_paperclip);
   const mineUnresolved = allUnresolved.filter(t => t.started_by_me);
   const hiddenByFilter = showAllThreads ? 0 : allUnresolved.length - mineUnresolved.length;
@@ -1687,7 +1713,9 @@ function App() {
             ${data.pr.title && html`<span class="pr-title">${data.pr.title}</span>`}
           </h1>
           <div class="meta">${metaBits.join(' · ')}</div>
-          ${data.update_available && html`<${RestartPill} />`}
+          ${data.update_available
+            ? html`<${RestartPill} />`
+            : frontendStale && html`<${ReloadPill} />`}
         </div>
         <${CiStrip} checks=${data.checks} />
       </div>
