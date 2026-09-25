@@ -41,8 +41,8 @@ use github::{
 use pr::{has_status_block, remove_status_block, update_body_with_status, PrClient, RealPrClient};
 use reply::{format_claude_message, RealReplyClient, ReplyClient};
 use threads::{
-    RealThreadsClient, ReviewThread, ThreadsClient, CLAUDE_MARKER, PAPERCLIP_EMOJI,
-    PAPERCLIP_SHORTCODE,
+    cleanable_threads, RealThreadsClient, ReviewThread, ThreadsClient, CLAUDE_MARKER,
+    PAPERCLIP_EMOJI, PAPERCLIP_SHORTCODE,
 };
 use view_state::{
     filter_by_extensions, plan_set, paths_needing_mark_unviewed, paths_needing_mark_viewed,
@@ -1000,10 +1000,7 @@ fn run_clean_threads_command(pr_context: &PrContext) {
             // This ordering matters: if we stripped paperclips first and then
             // deletion failed midway, a retry would no longer detect the
             // paperclip threads and might incorrectly delete them.
-            let pure_claude_threads: Vec<_> = threads
-                .iter()
-                .filter(|t| !t.has_paperclip() && t.is_resolved && t.is_pure_claude())
-                .collect();
+            let pure_claude_threads = cleanable_threads(&threads);
 
             if pure_claude_threads.is_empty() {
                 println!("  (no resolved pure-Claude threads found)");

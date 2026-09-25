@@ -159,6 +159,16 @@ pub fn find_actionable_threads(threads: Vec<ReviewThread>, my_login: &str) -> Ve
         .collect()
 }
 
+/// Find all threads that `clean-threads` would delete: resolved, pure-Claude
+/// (see `is_pure_claude`), and not marked with the paperclip (paperclip
+/// threads are preserved for human review, so they're never auto-deleted).
+pub fn cleanable_threads(threads: &[ReviewThread]) -> Vec<&ReviewThread> {
+    threads
+        .iter()
+        .filter(|t| !t.has_paperclip() && t.is_resolved && t.is_pure_claude())
+        .collect()
+}
+
 /// Trait for fetching review threads, allowing test implementations.
 pub trait ThreadsClient {
     fn fetch_threads(&self, owner: &str, repo: &str, pr_number: u64)
@@ -1118,5 +1128,29 @@ mod tests {
         let actionable = find_actionable_threads(threads, "glasser");
         assert_eq!(actionable.len(), 1);
         assert_eq!(actionable[0].thread.id, "T1");
+    }
+
+    #[test]
+    fn cleanable_threads_selects_resolved_pure_claude_non_paperclip() {
+        let threads = vec![
+            // T1: resolved + pure-Claude -> cleanable.
+            make_thread("T1", true, vec![make_comment("claude-bot", "🤖 From Claude: Fixed!")]),
+            // T2: pure-Claude but unresolved -> not cleanable.
+            make_thread("T2", false, vec![make_comment("claude-bot", "🤖 From Claude: Fixed!")]),
+            // T3: resolved but not pure-Claude (reviewer never posted a
+            // Claude comment) -> not cleanable.
+            make_thread("T3", true, vec![make_comment("reviewer", "Looks good")]),
+            // T4: resolved + pure-Claude but paperclipped -> preserved for
+            // human review, not cleanable.
+            make_thread(
+                "T4",
+                true,
+                vec![make_comment("claude-bot", "🤖 From Claude: :paperclip: Fixed!")],
+            ),
+        ];
+
+        let cleanable = cleanable_threads(&threads);
+        assert_eq!(cleanable.len(), 1);
+        assert_eq!(cleanable[0].id, "T1");
     }
 }

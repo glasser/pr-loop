@@ -15,9 +15,9 @@ use crate::checks::{Check, CheckStatus, ChecksClient, RealChecksClient};
 use crate::commit_edits::{CommitEditsClient, RealCommitEditsClient};
 use crate::commits::{CommitsClient, PrCommit, PrState, RealCommitsClient};
 use crate::git::{GitClient, RealGitClient};
-use crate::github::PrContext;
+use crate::github::{GitHubClient, PrContext, RealGitHubClient};
 use crate::reply::{RealReplyClient, ReplyClient};
-use crate::threads::{CLAUDE_IN_PROGRESS_MARKER, CLAUDE_MARKER};
+use crate::threads::{cleanable_threads, CLAUDE_IN_PROGRESS_MARKER, CLAUDE_MARKER};
 use crate::threads::{RealThreadsClient, ReviewThread, ThreadComment, ThreadsClient};
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -92,13 +92,20 @@ struct ThreadDto {
     /// than a final reply — the thread is being worked on but still needs
     /// a real response.
     is_in_progress: bool,
+    /// True if the authenticated GitHub user posted this thread's first
+    /// comment. Drives the web UI's default "just mine" filter — threads a
+    /// bot or another reviewer started are hidden unless the viewer opts
+    /// into seeing everything, since only the starter can really resolve
+    /// them. Always true if the user's login couldn't be determined (fails
+    /// open rather than hiding threads we can't classify).
+    started_by_me: bool,
     path: Option<String>,
     line: Option<u64>,
     comments: Vec<CommentDto>,
 }
 
-impl From<&ReviewThread> for ThreadDto {
-    fn from(t: &ReviewThread) -> Self {
+impl ThreadDto {
+    fn from_thread(t: &ReviewThread, my_login: Option<&str>) -> Self {
         Self {
             id: t.id.clone(),
             is_resolved: t.is_resolved,
@@ -107,6 +114,7 @@ impl From<&ReviewThread> for ThreadDto {
             is_in_progress: t
                 .last_comment()
                 .is_some_and(|c| c.body.starts_with(CLAUDE_IN_PROGRESS_MARKER)),
+            started_by_me: my_login.is_none_or(|login| t.started_by(login)),
             path: t.path.clone(),
             line: t.line,
             comments: t.comments.iter().map(CommentDto::from).collect(),
@@ -187,6 +195,12 @@ impl From<&Check> for CheckDto {
 struct State {
     pr: Option<PrDto>,
     threads: Vec<ThreadDto>,
+    /// How many of `threads` `clean-threads` (the CLI command and the
+    /// `/api/clean-threads` endpoint below) would delete: resolved,
+    /// pure-Claude, non-paperclip threads. Surfaced so the UI can offer to
+    /// clean up when the visible thread list is empty but there's stale
+    /// pure-Claude noise left over.
+    cleanable_thread_count: usize,
     commits: Vec<CommitDto>,
     checks: Vec<CheckDto>,
     last_fetched_at: Option<String>,
@@ -445,6 +459,48 @@ pub fn handle_request(
             let body = serde_json::to_string(ctx.peers)?;
             build_response(body, "application/json", 200)
         }
+        (&Method::Post, "/api/clean-threads") => {
+            let threads_client = RealThreadsClient;
+            // Fetch fresh rather than trusting the cached state — the last
+            // poll may be up to POLL_INTERVAL stale, and deleting comments
+            // is not something to do against stale data.
+            match threads_client.fetch_threads(
+                &pr_context.owner,
+                &pr_context.repo,
+                pr_context.pr_number,
+            ) {
+                Ok(threads) => {
+                    let comment_ids: Vec<&str> = cleanable_threads(&threads)
+                        .iter()
+                        .flat_map(|t| t.comment_ids())
+                        .collect();
+                    let reply_client = RealReplyClient;
+                    let mut deleted = 0;
+                    let mut failed = 0;
+                    for id in &comment_ids {
+                        match reply_client.delete_comment(id) {
+                            Ok(()) => deleted += 1,
+                            Err(e) => {
+                                eprintln!("Warning: Failed to delete comment {}: {}", id, e);
+                                failed += 1;
+                            }
+                        }
+                    }
+                    refresh_state(pr_context, shared);
+                    shared.poke();
+                    build_response(
+                        format!("{{\"deleted\":{},\"failed\":{}}}", deleted, failed),
+                        "application/json",
+                        200,
+                    )
+                }
+                Err(e) => build_response(
+                    format!("{{\"error\":\"{}\"}}", e.to_string().replace('"', "'")),
+                    "application/json",
+                    500,
+                ),
+            }
+        }
         (&Method::Post, p) if p.starts_with("/api/threads/") && p.ends_with("/resolve") => {
             let thread_id =
                 decode_thread_id(&p["/api/threads/".len()..p.len() - "/resolve".len()]);
@@ -586,7 +642,15 @@ fn refresh_state(pr_context: &PrContext, shared: &Arc<Shared>) {
     let threads_client = RealThreadsClient;
     let commits_client = RealCommitsClient;
     let commit_edits_client = RealCommitEditsClient;
-    fetch_now(pr_context, &threads_client, &commits_client, &commit_edits_client, shared);
+    let github_client = RealGitHubClient;
+    fetch_now(
+        pr_context,
+        &threads_client,
+        &commits_client,
+        &commit_edits_client,
+        &github_client,
+        shared,
+    );
 }
 
 fn build_response(body: String, ct: &str, status: u16) -> Response<std::io::Cursor<Vec<u8>>> {
@@ -609,6 +673,7 @@ fn poll_loop(shared: Arc<Shared>) {
     let threads_client = RealThreadsClient;
     let commits_client = RealCommitsClient;
     let commit_edits_client = RealCommitEditsClient;
+    let github_client = RealGitHubClient;
     let git = RealGitClient;
 
     let mut last_head: Option<String> = None;
@@ -633,7 +698,14 @@ fn poll_loop(shared: Arc<Shared>) {
         let should_fetch = ref_changed || now.duration_since(last_fetch) >= POLL_INTERVAL;
 
         if should_fetch {
-            fetch_now(&shared.pr_context, &threads_client, &commits_client, &commit_edits_client, &shared);
+            fetch_now(
+                &shared.pr_context,
+                &threads_client,
+                &commits_client,
+                &commit_edits_client,
+                &github_client,
+                &shared,
+            );
             last_fetch = Instant::now();
         }
 
@@ -651,7 +723,14 @@ fn poll_loop(shared: Arc<Shared>) {
                 return;
             }
             // Poked — fetch immediately.
-            fetch_now(&shared.pr_context, &threads_client, &commits_client, &commit_edits_client, &shared);
+            fetch_now(
+                &shared.pr_context,
+                &threads_client,
+                &commits_client,
+                &commit_edits_client,
+                &github_client,
+                &shared,
+            );
             last_fetch = Instant::now();
         }
     }
@@ -662,6 +741,7 @@ fn fetch_now(
     threads_client: &dyn ThreadsClient,
     commits_client: &dyn CommitsClient,
     commit_edits_client: &dyn CommitEditsClient,
+    github_client: &dyn GitHubClient,
     shared: &Arc<Shared>,
 ) {
     let threads_result =
@@ -684,7 +764,21 @@ fn fetch_now(
 
     match (threads_result, pr_info_result) {
         (Ok(threads), Ok(pr_info)) => {
-            state.threads = threads.iter().map(ThreadDto::from).collect();
+            state.cleanable_thread_count = cleanable_threads(&threads).len();
+            // Falls open (`None` -> every thread shown as "mine") if `gh`
+            // isn't authenticated, rather than hiding threads we can't
+            // classify.
+            let login = match github_client.current_user() {
+                Ok(login) => Some(login),
+                Err(e) => {
+                    eprintln!("Warning: failed to determine authenticated GitHub user: {}", e);
+                    None
+                }
+            };
+            state.threads = threads
+                .iter()
+                .map(|t| ThreadDto::from_thread(t, login.as_deref()))
+                .collect();
             // GitHub returns commits oldest-first; UI shows newest on top.
             state.commits = pr_info.commits.iter().rev().map(CommitDto::from).collect();
             if let Ok(pending) = &pending_reword_result {
@@ -845,6 +939,7 @@ mod tests {
             is_outdated: false,
             is_paperclip: paperclip,
             is_in_progress: last_comment_body.starts_with(CLAUDE_IN_PROGRESS_MARKER),
+            started_by_me: true,
             path: None,
             line: None,
             comments: vec![CommentDto {
@@ -894,6 +989,23 @@ mod tests {
         }
     }
 
+    /// Fixed-login `GitHubClient` so `fetch_now` tests never shell out to the
+    /// real `gh` CLI. `None` simulates an unauthenticated `gh`.
+    struct FixedGitHubClient(Option<&'static str>);
+    impl GitHubClient for FixedGitHubClient {
+        fn detect_repo(&self) -> Result<(String, String)> {
+            anyhow::bail!("not used in these tests")
+        }
+        fn detect_pr(&self, _owner: &str, _repo: &str) -> Result<u64> {
+            anyhow::bail!("not used in these tests")
+        }
+        fn current_user(&self) -> Result<String> {
+            self.0
+                .map(String::from)
+                .ok_or_else(|| anyhow::anyhow!("no login configured in test"))
+        }
+    }
+
     fn make_pr_commit(sha: &str, headline: &str) -> crate::commits::PrCommit {
         crate::commits::PrCommit {
             sha: sha.to_string(),
@@ -930,7 +1042,8 @@ mod tests {
             ..Default::default()
         };
 
-        fetch_now(&shared.pr_context, &threads_client, &commits_client, &commit_edits_client, &shared);
+        let github_client = FixedGitHubClient(Some("reviewer"));
+        fetch_now(&shared.pr_context, &threads_client, &commits_client, &commit_edits_client, &github_client, &shared);
 
         let state = shared.state.lock().unwrap();
         assert_eq!(state.commits.len(), 2);
@@ -938,6 +1051,154 @@ mod tests {
         let def = state.commits.iter().find(|c| c.sha == "def").unwrap();
         assert_eq!(abc.pending_reword.as_deref(), Some("Better message"));
         assert_eq!(def.pending_reword, None);
+    }
+
+    fn review_thread(id: &str, is_resolved: bool, comments: Vec<ThreadComment>) -> ReviewThread {
+        ReviewThread {
+            id: id.to_string(),
+            is_resolved,
+            is_outdated: false,
+            path: None,
+            line: None,
+            comments,
+        }
+    }
+
+    fn review_comment(author: &str, body: &str) -> ThreadComment {
+        ThreadComment {
+            id: format!("{}-{}", author, body.len()),
+            author: author.to_string(),
+            body: body.to_string(),
+            diff_hunk: None,
+            url: None,
+            created_at: None,
+        }
+    }
+
+    struct FixedThreadsClient(Vec<ReviewThread>);
+    impl ThreadsClient for FixedThreadsClient {
+        fn fetch_threads(&self, _owner: &str, _repo: &str, _pr: u64) -> Result<Vec<ReviewThread>> {
+            Ok(self.0.clone())
+        }
+        fn fetch_thread_by_comment_id(&self, _id: &str) -> Result<ReviewThread> {
+            anyhow::bail!("not used in these tests")
+        }
+    }
+
+    #[test]
+    fn fetch_now_marks_started_by_me_from_first_comment_author() {
+        let shared = Arc::new(shared_with_threads(vec![]));
+        let threads_client = FixedThreadsClient(vec![
+            review_thread("mine", false, vec![review_comment("glasser", "My question")]),
+            review_thread(
+                "someone-elses",
+                false,
+                vec![
+                    review_comment("coderabbitai", "A bot's question"),
+                    review_comment("glasser", "I joined in"),
+                ],
+            ),
+        ]);
+        let commits_client = crate::commits::tests::TestCommitsClient {
+            info: crate::commits::PrInfo {
+                title: "t".to_string(),
+                url: "u".to_string(),
+                state: crate::commits::PrState::Open,
+                is_draft: false,
+                is_in_merge_queue: false,
+                commits: vec![],
+            },
+        };
+        let commit_edits_client = crate::commit_edits::tests::TestCommitEditsClient::default();
+        let github_client = FixedGitHubClient(Some("glasser"));
+
+        fetch_now(
+            &shared.pr_context,
+            &threads_client,
+            &commits_client,
+            &commit_edits_client,
+            &github_client,
+            &shared,
+        );
+
+        let state = shared.state.lock().unwrap();
+        let mine = state.threads.iter().find(|t| t.id == "mine").unwrap();
+        let someone_elses = state.threads.iter().find(|t| t.id == "someone-elses").unwrap();
+        assert!(mine.started_by_me);
+        assert!(!someone_elses.started_by_me);
+    }
+
+    #[test]
+    fn fetch_now_fails_open_on_started_by_me_when_login_unknown() {
+        let shared = Arc::new(shared_with_threads(vec![]));
+        let threads_client = FixedThreadsClient(vec![review_thread(
+            "t1",
+            false,
+            vec![review_comment("coderabbitai", "A bot's question")],
+        )]);
+        let commits_client = crate::commits::tests::TestCommitsClient {
+            info: crate::commits::PrInfo {
+                title: "t".to_string(),
+                url: "u".to_string(),
+                state: crate::commits::PrState::Open,
+                is_draft: false,
+                is_in_merge_queue: false,
+                commits: vec![],
+            },
+        };
+        let commit_edits_client = crate::commit_edits::tests::TestCommitEditsClient::default();
+        let github_client = FixedGitHubClient(None); // simulates unauthenticated `gh`
+
+        fetch_now(
+            &shared.pr_context,
+            &threads_client,
+            &commits_client,
+            &commit_edits_client,
+            &github_client,
+            &shared,
+        );
+
+        let state = shared.state.lock().unwrap();
+        assert!(state.threads[0].started_by_me);
+    }
+
+    #[test]
+    fn fetch_now_counts_cleanable_threads() {
+        let shared = Arc::new(shared_with_threads(vec![]));
+        let threads_client = FixedThreadsClient(vec![
+            // Resolved + pure-Claude -> cleanable.
+            review_thread(
+                "cleanable",
+                true,
+                vec![review_comment("claude-bot", &format!("{} Fixed!", CLAUDE_MARKER))],
+            ),
+            // Resolved but not pure-Claude -> not cleanable.
+            review_thread("not-cleanable", true, vec![review_comment("reviewer", "Looks good")]),
+        ]);
+        let commits_client = crate::commits::tests::TestCommitsClient {
+            info: crate::commits::PrInfo {
+                title: "t".to_string(),
+                url: "u".to_string(),
+                state: crate::commits::PrState::Open,
+                is_draft: false,
+                is_in_merge_queue: false,
+                commits: vec![],
+            },
+        };
+        let commit_edits_client = crate::commit_edits::tests::TestCommitEditsClient::default();
+        let github_client = FixedGitHubClient(Some("glasser"));
+
+        fetch_now(
+            &shared.pr_context,
+            &threads_client,
+            &commits_client,
+            &commit_edits_client,
+            &github_client,
+            &shared,
+        );
+
+        let state = shared.state.lock().unwrap();
+        assert_eq!(state.cleanable_thread_count, 1);
     }
 
     #[test]
@@ -956,7 +1217,8 @@ mod tests {
         };
         let commit_edits_client = crate::commit_edits::tests::TestCommitEditsClient::default();
 
-        fetch_now(&shared.pr_context, &threads_client, &commits_client, &commit_edits_client, &shared);
+        let github_client = FixedGitHubClient(Some("reviewer"));
+        fetch_now(&shared.pr_context, &threads_client, &commits_client, &commit_edits_client, &github_client, &shared);
 
         let state = shared.state.lock().unwrap();
         assert_eq!(state.commits[0].pending_reword, None);

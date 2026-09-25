@@ -381,6 +381,7 @@ fn comment_body_renders_markdown_emoji_and_code_highlighting() {
             is_outdated: false,
             is_paperclip: false,
             is_in_progress: false,
+            started_by_me: true,
             path: None,
             line: None,
             comments: vec![CommentDto {
@@ -413,4 +414,112 @@ fn comment_body_renders_markdown_emoji_and_code_highlighting() {
         html.contains("hljs-"),
         "highlight.js should emit at least one hljs-* token span — got:\n{html}"
     );
+}
+
+fn thread_dto(id: &str, started_by_me: bool, author: &str) -> ThreadDto {
+    ThreadDto {
+        id: id.to_string(),
+        is_resolved: false,
+        is_outdated: false,
+        is_paperclip: false,
+        is_in_progress: false,
+        started_by_me,
+        path: Some("src/main.rs".to_string()),
+        line: Some(1),
+        comments: vec![CommentDto {
+            id: format!("{id}-c1"),
+            author: author.to_string(),
+            body: "Please take a look at this".to_string(),
+            diff_hunk: None,
+            url: None,
+            created_at: None,
+        }],
+    }
+}
+
+/// Regression test for the "only mine by default" thread filter: threads
+/// someone else (or a bot) started shouldn't clutter the default view, but
+/// must still be reachable via the "show all" checkbox.
+#[test]
+fn mine_only_filter_hides_threads_started_by_others_until_toggled() {
+    let base = start_test_server(State {
+        pr: Some(pr_dto("open", false, false)),
+        threads: vec![
+            thread_dto("mine", true, "glasser"),
+            thread_dto("bots", false, "coderabbitai"),
+        ],
+        ..Default::default()
+    });
+
+    let browser = Browser::default().expect("launch/fetch Chromium");
+    let tab = browser.new_tab().expect("open tab");
+    navigate_and_wait_for(&tab, &base, ".thread");
+
+    let thread_count = |tab: &Tab| -> i64 {
+        tab.evaluate("document.querySelectorAll('.thread').length", false)
+            .expect("evaluate")
+            .value
+            .and_then(|v| v.as_i64())
+            .expect("count is a number")
+    };
+    assert_eq!(
+        thread_count(&tab),
+        1,
+        "only the thread the authenticated user started should show by default"
+    );
+
+    tab.wait_for_element(".thread-filter-bar input[type=checkbox]")
+        .expect("filter checkbox")
+        .click()
+        .expect("click checkbox");
+    thread::sleep(Duration::from_millis(150));
+
+    assert_eq!(
+        thread_count(&tab),
+        2,
+        "checking \"show all\" should reveal the bot-started thread too"
+    );
+}
+
+/// Regression test for the empty-state clean-up prompt: when nothing needs
+/// review but `clean-threads` would still delete stale pure-Claude threads,
+/// the UI offers a two-click confirm. Deliberately never completes the
+/// second click here — that would hit `/api/clean-threads`, which deletes
+/// real GitHub comments and has no place in an automated test.
+#[test]
+fn empty_state_clean_up_button_requires_a_second_click_to_confirm() {
+    let base = start_test_server(State {
+        pr: Some(pr_dto("open", false, false)),
+        threads: vec![],
+        cleanable_thread_count: 2,
+        // The empty-state cleanup prompt only renders once a GitHub fetch
+        // has actually completed — otherwise the UI shows "Waiting for
+        // first GitHub fetch…" instead.
+        last_fetched_at: Some("2024-01-01T00:00:00Z".to_string()),
+        ..Default::default()
+    });
+
+    let browser = Browser::default().expect("launch/fetch Chromium");
+    let tab = browser.new_tab().expect("open tab");
+    let button = navigate_and_wait_for(&tab, &base, ".cleanup-prompt button.danger");
+    assert_eq!(button.get_inner_text().unwrap().trim(), "Clean up 2");
+
+    button.click().expect("first click arms confirmation");
+    thread::sleep(Duration::from_millis(150));
+    let armed = tab
+        .wait_for_element(".cleanup-prompt button.danger")
+        .expect("button still present after arming");
+    assert_eq!(armed.get_inner_text().unwrap().trim(), "Really delete 2?");
+
+    let cancel = tab
+        .wait_for_element(".cleanup-prompt button:not(.danger)")
+        .expect("cancel button appears once armed");
+    assert_eq!(cancel.get_inner_text().unwrap().trim(), "Cancel");
+    cancel.click().expect("click cancel");
+    thread::sleep(Duration::from_millis(150));
+
+    let disarmed = tab
+        .wait_for_element(".cleanup-prompt button.danger")
+        .expect("button still present after cancel");
+    assert_eq!(disarmed.get_inner_text().unwrap().trim(), "Clean up 2");
 }

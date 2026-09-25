@@ -666,6 +666,12 @@
     border-color: var(--accent);
   }
   button.primary:hover { filter: brightness(1.1); }
+  button.danger {
+    background: var(--danger-bg);
+    color: var(--danger-fg);
+    border-color: var(--danger-fg);
+  }
+  button.danger:hover { filter: brightness(0.95); }
   button:disabled { opacity: 0.6; cursor: not-allowed; }
   button.spin::before {
     content: '';
@@ -716,6 +722,31 @@
     padding: 48px 16px;
   }
   .empty .big { font-size: 32px; margin-bottom: 8px; }
+  .thread-filter-bar {
+    padding: 8px 4px;
+    margin-bottom: 8px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .thread-filter-bar label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+  }
+  .hidden-threads-note {
+    margin-bottom: 12px;
+  }
+  .hidden-threads-note button { margin-left: 8px; }
+  .cleanup-prompt {
+    margin-top: 20px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    font-size: 13px;
+  }
   #peers {
     position: fixed;
     right: 16px;
@@ -1485,6 +1516,49 @@ function PeersWidget() {
   `;
 }
 
+/// Offer to run `clean-threads` (delete resolved, pure-Claude threads) when
+/// there's nothing left to review but stale pure-Claude noise is still
+/// sitting on the PR. Requires two clicks — the first arms a confirmation
+/// that auto-disarms after a few seconds — since this deletes comments.
+function CleanThreadsPrompt({ count, onCleaned }) {
+  const [confirming, setConfirming] = useState(false);
+  const [cleaning, setCleaning] = useState(false);
+
+  useEffect(() => {
+    if (!confirming) return;
+    const id = setTimeout(() => setConfirming(false), 5000);
+    return () => clearTimeout(id);
+  }, [confirming]);
+
+  async function doClean() {
+    setCleaning(true);
+    try {
+      const res = await fetch('api/clean-threads', { method: 'POST' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      onCleaned();
+    } catch (e) {
+      alert(`Failed to clean threads: ${e.message}`);
+    } finally {
+      setCleaning(false);
+      setConfirming(false);
+    }
+  }
+
+  return html`
+    <div class="cleanup-prompt">
+      <span>${count} resolved thread${count === 1 ? '' : 's'} Claude already handled ${count === 1 ? 'is' : 'are'} still hanging around.</span>
+      <button
+        class=${'danger' + (cleaning ? ' spin' : '')}
+        disabled=${cleaning}
+        onClick=${() => (confirming ? doClean() : setConfirming(true))}
+      >
+        ${cleaning ? 'Cleaning…' : confirming ? `Really delete ${count}?` : `Clean up ${count}`}
+      </button>
+      ${confirming && !cleaning && html`<button onClick=${() => setConfirming(false)}>Cancel</button>`}
+    </div>
+  `;
+}
+
 function App() {
   const [data, setData] = useState(null);
   const [failures, setFailures] = useState(0);
@@ -1493,6 +1567,19 @@ function App() {
   const [newCommitShas, setNewCommitShas] = useState(() => new Set());
   // Tick every 10s so relative times stay fresh even without a data change.
   useTick(10000);
+
+  // Per-viewer convenience: default to only threads the user started (see
+  // `started_by_me`), but remember an opt-in to see everything. Threads
+  // other people or bots started are for a human to triage, not something
+  // pr-loop or its default view should surface as needing the user's
+  // attention.
+  const [showAllThreads, setShowAllThreadsState] = useState(() => {
+    try { return localStorage.getItem('pr-loop-show-all-threads') === '1'; } catch (_) { return false; }
+  });
+  function setShowAllThreads(next) {
+    setShowAllThreadsState(next);
+    try { localStorage.setItem('pr-loop-show-all-threads', next ? '1' : '0'); } catch (_) {}
+  }
 
   // Measure the sticky top-bar's actual height into a CSS variable so
   // sticky thread headers can stack correctly below it. Runs after every
@@ -1574,9 +1661,10 @@ function App() {
   }
 
   const connectionLost = failures >= 3;
-  const threads = sortThreads(
-    (data.threads || []).filter(t => !t.is_resolved && !t.is_paperclip)
-  );
+  const allUnresolved = (data.threads || []).filter(t => !t.is_resolved && !t.is_paperclip);
+  const mineUnresolved = allUnresolved.filter(t => t.started_by_me);
+  const hiddenByFilter = showAllThreads ? 0 : allUnresolved.length - mineUnresolved.length;
+  const threads = sortThreads(showAllThreads ? allUnresolved : mineUnresolved);
 
   const metaBits = [];
   if (data.last_fetched_at) metaBits.push(`GitHub synced ${relativeTime(data.last_fetched_at)}`);
@@ -1605,11 +1693,33 @@ function App() {
       </div>
       <div id="layout">
         <div id="threads">
+          <div class="thread-filter-bar">
+            <label>
+              <input
+                type="checkbox"
+                checked=${showAllThreads}
+                onChange=${(e) => setShowAllThreads(e.target.checked)}
+              />
+              Show all unresolved threads, not just ones you started
+            </label>
+          </div>
           ${threads.length > 0
             ? threads.map(t => html`<${Thread} thread=${t} onPoke=${poll} key=${t.id} />`)
             : !data.last_fetched_at
               ? html`<div class="empty">Waiting for first GitHub fetch…</div>`
-              : html`<div class="empty"><div class="big">🎉</div>No unresolved review threads.</div>`}
+              : html`<div class="empty">
+                  <div class="big">🎉</div>
+                  ${hiddenByFilter > 0
+                    ? html`<div class="hidden-threads-note">
+                        ${hiddenByFilter} unresolved thread${hiddenByFilter === 1 ? '' : 's'} hidden — not started by you.
+                        <button onClick=${() => setShowAllThreads(true)}>Show all</button>
+                      </div>`
+                    : 'No unresolved review threads.'}
+                  ${data.cleanable_thread_count > 0 && html`<${CleanThreadsPrompt}
+                    count=${data.cleanable_thread_count}
+                    onCleaned=${poll}
+                  />`}
+                </div>`}
         </div>
         <div id="commits-panel">
           <h2>Commits</h2>
