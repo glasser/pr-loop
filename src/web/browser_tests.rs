@@ -486,9 +486,13 @@ fn mine_only_filter_hides_threads_started_by_others_until_toggled() {
         .expect("filter checkbox label")
         .get_inner_text()
         .unwrap();
+    // Exact substring, not just `contains("1 thread")` — that would also
+    // match the htm whitespace-collapsing regression where a line break
+    // between two `${...}` expressions silently ate the space, rendering
+    // "1 threadstarted by @coderabbitai".
     assert!(
-        checkbox_label.contains("1 thread") && checkbox_label.contains("@coderabbitai"),
-        "checkbox label should name the starter and count — got {checkbox_label:?}"
+        checkbox_label.contains("1 thread started by @coderabbitai"),
+        "checkbox label should read \"1 thread started by @coderabbitai\" — got {checkbox_label:?}"
     );
 
     tab.wait_for_element(".thread-filter-bar input[type=checkbox]")
@@ -551,10 +555,9 @@ fn filter_checkbox_lists_distinct_starters_by_name() {
     let label = navigate_and_wait_for(&tab, &base, ".thread-filter-bar label");
     let text = label.get_inner_text().unwrap();
 
-    assert!(text.contains("4 threads"), "should count all 4 threads — got {text:?}");
     assert!(
-        text.contains("@coderabbitai, @reviewer-a, and @reviewer-b"),
-        "should list each distinct starter once, joined with an Oxford comma — got {text:?}"
+        text.contains("4 threads started by @coderabbitai, @reviewer-a, and @reviewer-b"),
+        "should count all 4 threads and list each distinct starter once, joined with an Oxford comma — got {text:?}"
     );
 }
 

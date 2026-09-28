@@ -1737,8 +1737,7 @@ function App() {
                   checked=${showAllThreads}
                   onChange=${(e) => setShowAllThreads(e.target.checked)}
                 />
-                ${othersUnresolved.length} thread${othersUnresolved.length === 1 ? '' : 's'}
-                started by ${joinWithAnd(otherStarters.map(a => `@${a}`))} — show ${othersUnresolved.length === 1 ? 'it' : 'them'} too
+                ${`${othersUnresolved.length} thread${othersUnresolved.length === 1 ? '' : 's'} started by ${joinWithAnd(otherStarters.map(a => `@${a}`))} — show ${othersUnresolved.length === 1 ? 'it' : 'them'} too`}
               </label>
             </div>
           `}
