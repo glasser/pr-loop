@@ -451,7 +451,8 @@ fn thread_dto(id: &str, started_by_me: bool, author: &str) -> ThreadDto {
 
 /// Regression test for the "only mine by default" thread filter: threads
 /// someone else (or a bot) started shouldn't clutter the default view, but
-/// must still be reachable via the "show all" checkbox.
+/// must still be reachable via the "show all" checkbox. Also checks the
+/// checkbox's label names the starter.
 #[test]
 fn mine_only_filter_hides_threads_started_by_others_until_toggled() {
     let base = start_test_server(State {
@@ -480,6 +481,16 @@ fn mine_only_filter_hides_threads_started_by_others_until_toggled() {
         "only the thread the authenticated user started should show by default"
     );
 
+    let checkbox_label = tab
+        .wait_for_element(".thread-filter-bar label")
+        .expect("filter checkbox label")
+        .get_inner_text()
+        .unwrap();
+    assert!(
+        checkbox_label.contains("1 thread") && checkbox_label.contains("@coderabbitai"),
+        "checkbox label should name the starter and count — got {checkbox_label:?}"
+    );
+
     tab.wait_for_element(".thread-filter-bar input[type=checkbox]")
         .expect("filter checkbox")
         .click()
@@ -490,6 +501,60 @@ fn mine_only_filter_hides_threads_started_by_others_until_toggled() {
         thread_count(&tab),
         2,
         "checking \"show all\" should reveal the bot-started thread too"
+    );
+}
+
+/// The filter checkbox is pure overhead when every unresolved thread is
+/// already the user's own — it should not render at all in that case.
+#[test]
+fn filter_checkbox_absent_when_no_other_starters() {
+    let base = start_test_server(State {
+        pr: Some(pr_dto("open", false, false)),
+        threads: vec![thread_dto("mine", true, "glasser")],
+        ..Default::default()
+    });
+
+    let browser = Browser::default().expect("launch/fetch Chromium");
+    let tab = browser.new_tab().expect("open tab");
+    navigate_and_wait_for(&tab, &base, ".thread");
+
+    let checkbox_present: bool = tab
+        .evaluate("!!document.querySelector('.thread-filter-bar')", false)
+        .expect("evaluate")
+        .value
+        .and_then(|v| v.as_bool())
+        .expect("boolean result");
+    assert!(
+        !checkbox_present,
+        "no filter checkbox should render when there's nobody else's thread to hide"
+    );
+}
+
+/// Regression test for the "@foo, @bar, and @baz" listing: distinct
+/// starters, deduplicated, joined with a proper Oxford-comma "and".
+#[test]
+fn filter_checkbox_lists_distinct_starters_by_name() {
+    let base = start_test_server(State {
+        pr: Some(pr_dto("open", false, false)),
+        threads: vec![
+            thread_dto("t1", false, "coderabbitai"),
+            thread_dto("t2", false, "reviewer-a"),
+            // Same starter as t1 again — shouldn't be listed twice.
+            thread_dto("t3", false, "coderabbitai"),
+            thread_dto("t4", false, "reviewer-b"),
+        ],
+        ..Default::default()
+    });
+
+    let browser = Browser::default().expect("launch/fetch Chromium");
+    let tab = browser.new_tab().expect("open tab");
+    let label = navigate_and_wait_for(&tab, &base, ".thread-filter-bar label");
+    let text = label.get_inner_text().unwrap();
+
+    assert!(text.contains("4 threads"), "should count all 4 threads — got {text:?}");
+    assert!(
+        text.contains("@coderabbitai, @reviewer-a, and @reviewer-b"),
+        "should list each distinct starter once, joined with an Oxford comma — got {text:?}"
     );
 }
 

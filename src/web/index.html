@@ -731,13 +731,10 @@
   .thread-filter-bar label {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 6px;
     cursor: pointer;
   }
-  .hidden-threads-note {
-    margin-bottom: 12px;
-  }
-  .hidden-threads-note button { margin-left: 8px; }
   .cleanup-prompt {
     margin-top: 20px;
     display: flex;
@@ -864,6 +861,14 @@ const ANY_CLAUDE_MARKER_RE = /^(?:🤖 From Claude:|🚧 From Claude \(in progre
 /// the top (ordered by most-recent-Claude-comment, newest first), and
 /// threads without any Claude comment come below (ordered by most-recent
 /// comment, newest first). Missing timestamps sort last within each group.
+/// "a" / "a and b" / "a, b, and c" — for listing who started the threads
+/// hidden by the "just mine" filter.
+function joinWithAnd(items) {
+  if (items.length <= 1) return items.join('');
+  if (items.length === 2) return `${items[0]} and ${items[1]}`;
+  return `${items.slice(0, -1).join(', ')}, and ${items[items.length - 1]}`;
+}
+
 function sortThreads(threads) {
   const keyed = threads.map(t => {
     let newestClaude = null;
@@ -1689,7 +1694,10 @@ function App() {
   const frontendStale = !data.update_available && data.server_instance_id !== SERVER_INSTANCE_ID;
   const allUnresolved = (data.threads || []).filter(t => !t.is_resolved && !t.is_paperclip);
   const mineUnresolved = allUnresolved.filter(t => t.started_by_me);
-  const hiddenByFilter = showAllThreads ? 0 : allUnresolved.length - mineUnresolved.length;
+  const othersUnresolved = allUnresolved.filter(t => !t.started_by_me);
+  // Distinct starters, in the order their thread first appears, for "N
+  // threads started by @foo, @bar, and @baz".
+  const otherStarters = [...new Set(othersUnresolved.map(t => t.comments[0] && t.comments[0].author).filter(Boolean))];
   const threads = sortThreads(showAllThreads ? allUnresolved : mineUnresolved);
 
   const metaBits = [];
@@ -1721,28 +1729,26 @@ function App() {
       </div>
       <div id="layout">
         <div id="threads">
-          <div class="thread-filter-bar">
-            <label>
-              <input
-                type="checkbox"
-                checked=${showAllThreads}
-                onChange=${(e) => setShowAllThreads(e.target.checked)}
-              />
-              Show all unresolved threads, not just ones you started
-            </label>
-          </div>
+          ${otherStarters.length > 0 && html`
+            <div class="thread-filter-bar">
+              <label>
+                <input
+                  type="checkbox"
+                  checked=${showAllThreads}
+                  onChange=${(e) => setShowAllThreads(e.target.checked)}
+                />
+                ${othersUnresolved.length} thread${othersUnresolved.length === 1 ? '' : 's'}
+                started by ${joinWithAnd(otherStarters.map(a => `@${a}`))} — show ${othersUnresolved.length === 1 ? 'it' : 'them'} too
+              </label>
+            </div>
+          `}
           ${threads.length > 0
             ? threads.map(t => html`<${Thread} thread=${t} onPoke=${poll} key=${t.id} />`)
             : !data.last_fetched_at
               ? html`<div class="empty">Waiting for first GitHub fetch…</div>`
               : html`<div class="empty">
                   <div class="big">🎉</div>
-                  ${hiddenByFilter > 0
-                    ? html`<div class="hidden-threads-note">
-                        ${hiddenByFilter} unresolved thread${hiddenByFilter === 1 ? '' : 's'} hidden — not started by you.
-                        <button onClick=${() => setShowAllThreads(true)}>Show all</button>
-                      </div>`
-                    : 'No unresolved review threads.'}
+                  No unresolved review threads.
                   ${data.cleanable_thread_count > 0 && html`<${CleanThreadsPrompt}
                     count=${data.cleanable_thread_count}
                     onCleaned=${poll}
