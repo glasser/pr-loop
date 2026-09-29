@@ -295,6 +295,38 @@ fn option_q_rewraps_paragraph_and_confirms_hooks_work() {
     );
 }
 
+/// The reword textarea draws a column-72 ruler (a background-image
+/// gradient) so it's visible while typing that a long line is soft-wrapping
+/// on-screen rather than actually broken — CSS-only, so nothing in
+/// `cargo test`'s Rust unit tests would catch this regressing.
+#[test]
+fn reword_textarea_shows_a_soft_wrap_ruler() {
+    let base = start_test_server(one_commit_state(""));
+
+    let browser = Browser::default().expect("launch/fetch Chromium");
+    let tab = browser.new_tab().expect("open tab");
+    navigate_and_wait_for(&tab, &base, ".edit-btn")
+        .click()
+        .expect("click edit button");
+    tab.wait_for_element(".reword-modal textarea")
+        .expect("modal textarea should appear");
+
+    let background_image: serde_json::Value = tab
+        .evaluate(
+            "getComputedStyle(document.querySelector('.reword-modal textarea')).backgroundImage",
+            false,
+        )
+        .expect("read computed backgroundImage")
+        .value
+        .expect("value present");
+    let background_image = background_image.as_str().expect("value is a string");
+
+    assert!(
+        background_image.contains("gradient"),
+        "reword textarea should draw a ruler via a background gradient — got:\n{background_image}"
+    );
+}
+
 /// The badge is pure rendering logic (github.com-style icon/label from
 /// `pr.state` + `is_draft` + `is_in_merge_queue`), so this could in principle
 /// be a Rust unit test if that logic lived in Rust — it doesn't, it's inline

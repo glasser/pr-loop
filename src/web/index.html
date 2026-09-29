@@ -479,10 +479,17 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 13px;
     line-height: 1.5;
-    background: var(--bg);
+    background-color: var(--bg);
     color: var(--fg);
     resize: vertical;
     box-sizing: border-box;
+    /* A ruler at column 72 (the wrap width ⌥Q/"Rewrap paragraph" targets),
+       so it's visible while typing that a line is about to soft-wrap
+       on-screen without actually breaking — the wrapped line is still one
+       long logical line until it's hard-wrapped. */
+    background-image: linear-gradient(to right, transparent calc(72ch - 1px), var(--border) calc(72ch - 1px), var(--border) 72ch, transparent 72ch);
+    background-repeat: no-repeat;
+    background-origin: content-box;
   }
   .reword-modal .hint {
     color: var(--muted);
@@ -1564,7 +1571,7 @@ function Commit({ commit, isNew, onDismiss, onPoke, onOrphanedEdit }) {
               }}
             ></textarea>
             <div class="hint">
-              First line is the headline; leave a blank line before the body. Cmd/Ctrl+Enter to submit, Esc to cancel.
+              First line is the headline; leave a blank line before the body. The line marks column 72 — text past it is soft-wrapping on-screen, not actually broken yet. Cmd/Ctrl+Enter to submit, Esc to cancel.
               <button type="button" class="rewrap-btn" onClick=${rewrapParagraph} title="Re-wrap the paragraph under the cursor to 72 columns (⌥Q)">¶ Rewrap paragraph</button>
             </div>
             <div class="actions">
