@@ -662,3 +662,129 @@ fn reload_pill_appears_after_hub_restarts_since_page_load() {
         "pill should prompt a reload, not a restart, since no code update is pending — got {text:?}"
     );
 }
+
+/// Like `start_test_server`, but also hands back the `Shared` handle so a
+/// test can mutate `state` after the page has loaded — e.g. to simulate the
+/// poll loop picking up a rebase that changed which commits exist.
+fn start_test_server_with_shared_state(state: State) -> (String, Arc<Shared>) {
+    let shared = Arc::new(Shared {
+        pr_context: PrContext {
+            owner: "glasser".to_string(),
+            repo: "pr-loop-test-repo".to_string(),
+            pr_number: 1,
+        },
+        state: Mutex::new(state),
+        trigger: (Mutex::new(false), Condvar::new()),
+        checkout_path: Mutex::new(PathBuf::from("/tmp")),
+        claude_pid: Mutex::new(None),
+        last_seen: Mutex::new(Instant::now()),
+        merged: AtomicBool::new(false),
+        stop: AtomicBool::new(false),
+    });
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+    let port = listener.local_addr().expect("local_addr").port();
+    let server = tiny_http::Server::from_listener(listener, None).expect("tiny_http server");
+
+    let shared_for_server = Arc::clone(&shared);
+    thread::spawn(move || {
+        let empty_peers: Vec<PeerInfo> = Vec::new();
+        for request in server.incoming_requests() {
+            let path = request.url().split('?').next().unwrap_or("/").to_string();
+            let ctx = RequestContext {
+                update_available: false,
+                peers: &empty_peers,
+                server_instance_id: "test-instance",
+            };
+            let _ = handle_request(request, &path, &shared_for_server, &ctx);
+        }
+    });
+
+    (format!("http://127.0.0.1:{port}/"), shared)
+}
+
+/// Regression test: the reword modal is keyed by commit sha (see the
+/// `data.commits.map` call in index.html), so when the underlying commit
+/// disappears from state — e.g. Claude rebased, amended, or split it into
+/// different commits while the modal was open — the `Commit` component
+/// unmounts and the modal just closes. That's correct: there's no longer a
+/// commit to attach the edit to. But it must not silently discard what the
+/// user had typed — this is exactly what was reported as a bad experience
+/// (typing in the reword modal, the commit list changing underneath, and the
+/// modal just closing with the draft gone).
+#[test]
+fn orphaned_reword_draft_is_preserved_when_its_commit_disappears() {
+    let (base, shared) = start_test_server_with_shared_state(one_commit_state("Original body."));
+
+    let browser = Browser::default().expect("launch/fetch Chromium");
+    let tab = browser.new_tab().expect("open tab");
+    navigate_and_wait_for(&tab, &base, ".edit-btn")
+        .click()
+        .expect("click edit button");
+
+    let textarea = tab
+        .wait_for_element(".reword-modal textarea")
+        .expect("modal should open");
+    // Set the value directly (rather than typing character-by-character)
+    // and dispatch a real `input` event so preact's onInput handler updates
+    // `draft` — preact, unlike React, doesn't override the native `value`
+    // setter, so this is a faithful stand-in for the user typing.
+    textarea
+        .call_js_fn(
+            "function(v) { this.value = v; this.dispatchEvent(new Event('input', { bubbles: true })); }",
+            vec![serde_json::Value::String("MY UNSAVED DRAFT — DO NOT LOSE ME".to_string())],
+            false,
+        )
+        .expect("set draft text");
+
+    // Simulate the 1s poll observing a rebase: the commit being edited is
+    // gone, replaced by an unrelated commit (as if it had been split in
+    // two). Same sha would just re-render in place; a genuinely different
+    // sha is what unmounts the keyed Commit component.
+    {
+        let mut state = shared.state.lock().unwrap();
+        state.commits = vec![CommitDto {
+            sha: "deadbeef0000".to_string(),
+            abbreviated_sha: "deadbee".to_string(),
+            message_headline: "A different commit entirely".to_string(),
+            message_body_first_line: None,
+            message_body: String::new(),
+            committed_date: "2024-01-01T00:00:01Z".to_string(),
+            author_name: None,
+            author_login: None,
+            url: "https://example.com/commit/deadbeef0000".to_string(),
+            pending_reword: None,
+        }];
+    }
+    thread::sleep(Duration::from_millis(1300));
+
+    let modal_gone: bool = tab
+        .evaluate("!document.querySelector('.reword-modal')", false)
+        .expect("evaluate")
+        .value
+        .and_then(|v| v.as_bool())
+        .expect("boolean result");
+    assert!(modal_gone, "modal should close once its commit disappears from state");
+
+    let banner = tab
+        .wait_for_element(".orphaned-edit")
+        .expect("an orphaned-draft banner should appear in place of silently losing the text");
+    let banner_text = banner.get_inner_text().expect("banner text");
+    assert!(
+        banner_text.contains("abc123d"),
+        "banner should name the (now-vanished) commit that was being rewritten — got {banner_text:?}"
+    );
+
+    let recovered_value: serde_json::Value = tab
+        .wait_for_element(".orphaned-edit textarea")
+        .expect("orphaned-edit banner should contain the preserved draft")
+        .call_js_fn("function() { return this.value }", vec![], false)
+        .expect("read textarea value")
+        .value
+        .expect("value present");
+    assert_eq!(
+        recovered_value.as_str(),
+        Some("MY UNSAVED DRAFT — DO NOT LOSE ME"),
+        "the user's draft text must survive the commit disappearing out from under them"
+    );
+}

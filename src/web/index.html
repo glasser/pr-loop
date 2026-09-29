@@ -481,6 +481,42 @@
     gap: 8px;
     align-items: center;
   }
+  .orphaned-edit {
+    margin-bottom: 12px;
+    padding: 8px 10px;
+    background: var(--in-progress-bg);
+    color: var(--in-progress-fg);
+    border-radius: 6px;
+    font-size: 12px;
+  }
+  .orphaned-edit .label {
+    font-weight: 600;
+    display: block;
+    margin-bottom: 6px;
+  }
+  .orphaned-edit textarea {
+    width: 100%;
+    min-height: 80px;
+    box-sizing: border-box;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 6px 8px;
+    resize: vertical;
+  }
+  .orphaned-edit .actions {
+    margin-top: 6px;
+    display: flex;
+    gap: 8px;
+  }
+  .orphaned-edit button {
+    font-size: 11px;
+    padding: 2px 8px;
+  }
   .thread {
     border: 1px solid var(--border);
     border-radius: 6px;
@@ -1361,7 +1397,7 @@ function rewrapParagraphAt(text, cursor, width = REWRAP_WIDTH) {
   return { text: newLines.join('\n'), cursor: paragraphEndOffset };
 }
 
-function Commit({ commit, isNew, onDismiss, onPoke }) {
+function Commit({ commit, isNew, onDismiss, onPoke, onOrphanedEdit }) {
   const ago = relativeTime(commit.committed_date);
   const author = commit.author_login || commit.author_name || '';
   const dismiss = () => { if (isNew) onDismiss(commit.sha); };
@@ -1376,6 +1412,21 @@ function Commit({ commit, isNew, onDismiss, onPoke }) {
   const [posting, setPosting] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const textareaRef = useRef(null);
+
+  // This component is keyed by commit sha (see the `data.commits.map` call
+  // below), so it unmounts outright — rather than re-rendering — when the
+  // underlying commit disappears from the next poll (e.g. Claude rebased,
+  // amended, or split it into different commits while the reword modal was
+  // open). Preserve whatever the user had typed via the parent, rather than
+  // just silently losing it: it's meaningless to keep editing a commit that
+  // no longer exists, but the user's words are still worth keeping around.
+  const editingRef = useRef(editing);
+  editingRef.current = editing;
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  useEffect(() => () => {
+    if (editingRef.current) onOrphanedEdit(commit.sha, commit.abbreviated_sha, draftRef.current);
+  }, []);
 
   function startEdit() {
     setDraft(commit.pending_reword ?? fullMessage);
@@ -1590,6 +1641,10 @@ function App() {
   // Commits present on first data load — anything seen after is "new".
   const seenCommitShas = useRef(null);
   const [newCommitShas, setNewCommitShas] = useState(() => new Set());
+  // A reword draft whose commit disappeared out from under the user (see
+  // Commit's unmount effect) — surfaced so the text isn't just lost.
+  const [orphanedEdit, setOrphanedEdit] = useState(null);
+  const onOrphanedEdit = (sha, abbreviatedSha, draft) => setOrphanedEdit({ sha, abbreviatedSha, draft });
   // Tick every 10s so relative times stay fresh even without a data change.
   useTick(10000);
 
@@ -1756,6 +1811,16 @@ function App() {
         </div>
         <div id="commits-panel">
           <h2>Commits</h2>
+          ${orphanedEdit && html`
+            <div class="orphaned-edit">
+              <span class="label">⚠ The commit you were rewording (${orphanedEdit.abbreviatedSha}) changed underneath you — likely rewritten or split by Claude — so the editor closed. Your draft wasn't lost; copy what you need below:</span>
+              <textarea readOnly value=${orphanedEdit.draft} onClick=${(e) => e.target.select()}></textarea>
+              <div class="actions">
+                <button onClick=${() => { navigator.clipboard?.writeText(orphanedEdit.draft).catch(() => {}); }}>Copy draft</button>
+                <button onClick=${() => setOrphanedEdit(null)}>Dismiss</button>
+              </div>
+            </div>
+          `}
           <div id="commits">
             ${(data.commits || []).length === 0
               ? html`<div class="commit"><span class="meta">No commits</span></div>`
@@ -1764,6 +1829,7 @@ function App() {
                   isNew=${newCommitShas.has(c.sha)}
                   onDismiss=${dismissCommit}
                   onPoke=${poll}
+                  onOrphanedEdit=${onOrphanedEdit}
                   key=${c.sha}
                 />`)}
           </div>
