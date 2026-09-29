@@ -247,6 +247,29 @@
     margin-left: auto;
     color: var(--muted);
     font-size: 12px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .sync-btn {
+    border: none;
+    background: none;
+    color: var(--muted);
+    cursor: pointer;
+    padding: 4px;
+    line-height: 1;
+    border-radius: 4px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .sync-btn:hover:not(:disabled) { color: var(--accent); }
+  .sync-btn:disabled { cursor: default; }
+  .sync-btn .sync-icon { display: inline-block; font-size: 20px; }
+  .sync-btn .sync-icon.spinning { animation: sync-spin 0.8s linear infinite; }
+  @keyframes sync-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
   }
   #ci-strip {
     padding: 6px 16px;
@@ -1248,6 +1271,30 @@ function ReloadPill() {
   `;
 }
 
+// Wakes the server's poll loop for an immediate GitHub fetch rather than
+// waiting out POLL_INTERVAL. `/api/poke` only signals the poller and returns
+// right away — it doesn't wait for the fetch to land — so the spinner is
+// cleared once the client's regular 1s /api/state poll observes a
+// last_fetched_at newer than the one at click time.
+function SyncNowButton({ lastFetchedAt }) {
+  const [syncing, setSyncing] = useState(false);
+  const startedAt = useRef(null);
+  const onClick = async () => {
+    if (syncing) return;
+    setSyncing(true);
+    startedAt.current = lastFetchedAt;
+    try { await fetch('api/poke', { method: 'POST' }); } catch (_) {}
+  };
+  useEffect(() => {
+    if (syncing && lastFetchedAt !== startedAt.current) setSyncing(false);
+  }, [lastFetchedAt]);
+  return html`
+    <button class="sync-btn" onClick=${onClick} disabled=${syncing} title="Sync with GitHub now">
+      <span class=${`sync-icon${syncing ? ' spinning' : ''}`}>⟳</span>
+    </button>
+  `;
+}
+
 function CcWaitingOverlay({ status }) {
   if (!status || status.activity !== 'waiting') return null;
   const reason = status.waiting_for;
@@ -1775,7 +1822,10 @@ function App() {
               : html`${data.pr.owner}/${data.pr.repo} #${data.pr.pr_number}`}
             ${data.pr.title && html`<span class="pr-title">${data.pr.title}</span>`}
           </h1>
-          <div class="meta">${metaBits.join(' · ')}</div>
+          <div class="meta">
+            ${metaBits.join(' · ')}
+            ${data.last_fetched_at && html`<${SyncNowButton} lastFetchedAt=${data.last_fetched_at} />`}
+          </div>
           ${data.update_available
             ? html`<${RestartPill} />`
             : frontendStale && html`<${ReloadPill} />`}
