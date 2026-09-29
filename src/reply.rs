@@ -206,6 +206,20 @@ pub fn format_claude_message(message: &str, in_progress: bool) -> String {
     format!("{} {}", marker, message)
 }
 
+/// Whether a reply must be posted as an in-progress ack rather than a final
+/// reply, given whether the caller asked for `--in-progress` and whether
+/// newer human comments arrived after the one being replied to.
+///
+/// A reply that doesn't address newer comments must never use the final
+/// marker: `ReviewThread::needs_response` only looks at the *last* comment,
+/// and a final reply is always chronologically last, so it would make the
+/// thread look fully resolved even though those newer comments were never
+/// addressed. Relying on the agent noticing the newer-comments notice printed
+/// to stdout isn't reliable enough to guard against silently dropping them.
+pub fn should_post_as_in_progress(requested_in_progress: bool, has_newer_comments: bool) -> bool {
+    requested_in_progress || has_newer_comments
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,6 +284,81 @@ mod tests {
         assert!(formatted.starts_with(CLAUDE_IN_PROGRESS_MARKER));
         assert!(!formatted.starts_with(CLAUDE_MARKER));
         assert!(formatted.contains("Looking into it"));
+    }
+
+    #[test]
+    fn should_post_as_in_progress_when_explicitly_requested() {
+        assert!(should_post_as_in_progress(true, false));
+    }
+
+    #[test]
+    fn should_post_as_in_progress_when_newer_comments_arrived() {
+        // Even if the caller intended a final reply, newer comments that
+        // arrived after the one being replied to mean this reply can't
+        // honestly be final.
+        assert!(should_post_as_in_progress(false, true));
+    }
+
+    #[test]
+    fn should_post_as_in_progress_when_neither() {
+        assert!(!should_post_as_in_progress(false, false));
+    }
+
+    #[test]
+    fn should_post_as_in_progress_when_both() {
+        assert!(should_post_as_in_progress(true, true));
+    }
+
+    /// Reproduces the bug this function fixes: if a final reply were posted
+    /// (in_progress=false) despite newer comments having arrived, the thread
+    /// would look fully resolved to `needs_response()` even though the newer
+    /// comments were never addressed — silently dropping them, not just
+    /// delaying them. Posting with the marker this function chooses instead
+    /// keeps the thread actionable.
+    #[test]
+    fn posting_without_in_progress_marker_would_hide_unaddressed_newer_comments() {
+        use crate::threads::{ReviewThread, ThreadComment};
+
+        let make_comment = |id: &str, body: &str| ThreadComment {
+            id: id.to_string(),
+            author: "reviewer".to_string(),
+            body: body.to_string(),
+            diff_hunk: None,
+            url: None,
+            created_at: None,
+        };
+
+        // C1: original human comment being replied to.
+        // C2: a newer human comment that arrived while Claude was working.
+        // Reply: posted after both, addressing only C1.
+        let has_newer_comments = true;
+        let final_marker_would_be_used = !should_post_as_in_progress(false, has_newer_comments);
+        assert!(
+            !final_marker_would_be_used,
+            "must not use the final marker when newer comments weren't addressed"
+        );
+
+        let reply_body = format_claude_message(
+            "Fixed it",
+            should_post_as_in_progress(false, has_newer_comments),
+        );
+        let thread = ReviewThread {
+            id: "THREAD1".to_string(),
+            is_resolved: false,
+            is_outdated: false,
+            path: None,
+            line: None,
+            comments: vec![
+                make_comment("C1", "please fix this"),
+                make_comment("C2", "also consider this"),
+                make_comment("R1", &reply_body),
+            ],
+        };
+
+        assert!(
+            thread.needs_response(),
+            "thread must still be flagged actionable so C2 isn't dropped"
+        );
     }
 
     #[test]

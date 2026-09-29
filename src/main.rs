@@ -39,7 +39,7 @@ use github::{
     RealGitHubClient, RealMergeableClient,
 };
 use pr::{has_status_block, remove_status_block, update_body_with_status, PrClient, RealPrClient};
-use reply::{format_claude_message, RealReplyClient, ReplyClient};
+use reply::{format_claude_message, should_post_as_in_progress, RealReplyClient, ReplyClient};
 use threads::{
     cleanable_threads, RealThreadsClient, ReviewThread, ThreadsClient, CLAUDE_MARKER,
     PAPERCLIP_EMOJI, PAPERCLIP_SHORTCODE,
@@ -272,7 +272,9 @@ fn main() {
                 message.clone()
             };
 
-            let formatted_message = format_claude_message(&final_message, in_progress);
+            let has_newer_comments = !newer_comments.is_empty();
+            let effective_in_progress = should_post_as_in_progress(in_progress, has_newer_comments);
+            let formatted_message = format_claude_message(&final_message, effective_in_progress);
 
             println!(
                 "Replying to thread {} on {}/{}#{}{}",
@@ -280,20 +282,26 @@ fn main() {
                 pr_context.owner,
                 pr_context.repo,
                 pr_context.pr_number,
-                if in_progress { " (interim ack)" } else { "" }
+                if effective_in_progress { " (interim ack)" } else { "" }
             );
 
             match reply_client.post_reply(&thread_id, &formatted_message) {
                 Ok(result) => {
                     println!("✓ Reply posted (comment ID: {})", result.comment_id);
-                    if in_progress {
-                        println!(
-                            "  Note: this thread will keep showing up as needing a response until you reply again without --in-progress."
-                        );
+                    if effective_in_progress {
+                        if has_newer_comments && !in_progress {
+                            println!(
+                                "  Note: newer comments arrived after the one you replied to, so this was posted as an in-progress ack, not a final reply. The thread will keep showing up as needing a response until you address the comments below and reply again."
+                            );
+                        } else {
+                            println!(
+                                "  Note: this thread will keep showing up as needing a response until you reply again without --in-progress."
+                            );
+                        }
                     }
 
                     // If there were newer comments, print them for the invoker
-                    if !newer_comments.is_empty() {
+                    if has_newer_comments {
                         print_newer_comments(&newer_comments, &thread_id);
                     }
 
