@@ -129,13 +129,7 @@ fn main() {
             return;
         }
         Some(Command::Statusline) => {
-            // Claude Code pipes session JSON on stdin; we don't need it.
-            // Must stay fast and must never fail: a non-zero exit blanks the
-            // status line, and so does empty output, which is what we want
-            // when nothing is looping.
-            if let Some(line) = loops::format_statusline(&loops::list_active_now()) {
-                println!("{}", line);
-            }
+            run_statusline();
             return;
         }
         Some(Command::Config { action }) => {
@@ -569,6 +563,19 @@ fn main() {
 /// Fetch CI failure info (logs + test failures) for failed checks. Handles
 /// both CircleCI (via their API; requires CIRCLECI_TOKEN) and GitHub Actions
 /// (via `gh api`, no extra credentials needed).
+/// `pr-loop statusline`. Must stay fast and must never fail: a non-zero exit
+/// blanks the status line, and so does empty output, which is what we want
+/// when nothing is looping. Claude Code pipes session JSON on stdin; we don't
+/// need it.
+fn run_statusline() {
+    let records = loops::list_active_now();
+    let port = config::load().hub_port();
+    let link = |owner: &str, repo: &str, n: u64| hub::pr_page_url(port, owner, repo, n);
+    if let Some(line) = loops::format_statusline(&records, Some(&link)) {
+        println!("{}", line);
+    }
+}
+
 /// Announce an in-progress wait in the machine-wide loop registry (see
 /// `loops.rs`). Best-effort: `None` just means the wait goes untracked.
 fn register_loop(pr_context: &PrContext, mode: loops::LoopMode, timeout_secs: u64) -> Option<loops::LoopGuard> {

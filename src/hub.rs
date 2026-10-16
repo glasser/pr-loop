@@ -519,6 +519,12 @@ pub fn notify_register(pr_context: &PrContext, checkout_path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// The hub's page for a PR, on the same loopback address `notify_register`
+/// assumes the hub is reachable at.
+pub fn pr_page_url(port: u16, owner: &str, repo: &str, pr_number: u64) -> String {
+    format!("http://127.0.0.1:{}/pr/{}/{}/{}/", port, owner, repo, pr_number)
+}
+
 /// Best-effort: if the hub has a tracker for this PR, ask it to refetch from
 /// GitHub immediately, so a UI open on it updates right away after e.g.
 /// `pr-loop reply`. Silently does nothing if the hub or the tracker isn't up

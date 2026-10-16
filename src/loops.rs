@@ -1,7 +1,7 @@
 // Machine-wide registry of in-progress `--wait-until-actionable[-or-happy]`
-// runs, so other things (the Claude Code status line via `pr-loop
-// statusline`, the hub's PR page header) can tell which PRs are actively
-// being looped on right now.
+// runs, so other things can tell which PRs are actively being looped on right
+// now: the hub's PR page header and the Claude Code status line via
+// `pr-loop statusline`.
 //
 // Each waiting process drops a small JSON file named `<pid>.json` into
 // `loops_dir()` and removes it when the wait ends. That removal can't be
@@ -152,6 +152,11 @@ pub fn list_active_now() -> Vec<LoopRecord> {
     }
 }
 
+/// Wrap `text` in an OSC 8 terminal hyperlink to `url`.
+fn osc8(url: &str, text: &str) -> String {
+    format!("\x1b]8;;{}\x1b\\{}\x1b]8;;\x1b\\", url, text)
+}
+
 /// How a single PR is being looped on, collapsing multiple waits on the
 /// same PR. A plain `Actionable` wait wins over `UntilHappy` — the marker is
 /// for "this will stop on its own once green", which isn't true if any wait
@@ -172,8 +177,12 @@ pub fn mode_for_pr(records: &[LoopRecord], owner: &str, repo: &str, pr_number: u
 /// The one-line Claude Code status line text, or `None` when nothing is
 /// looping (so the status line stays empty). PR refs are bare `#N` unless
 /// the active loops span more than one repo; until-happy loops get a
-/// trailing marker, plain ones don't.
-pub fn format_statusline(records: &[LoopRecord]) -> Option<String> {
+/// trailing marker, plain ones don't. With `link`, each PR ref is an OSC 8
+/// hyperlink to `link(owner, repo, pr_number)`.
+pub fn format_statusline(
+    records: &[LoopRecord],
+    link: Option<&dyn Fn(&str, &str, u64) -> String>,
+) -> Option<String> {
     let mut prs: Vec<(&str, &str, u64)> = records
         .iter()
         .map(|r| (r.owner.as_str(), r.repo.as_str(), r.pr_number))
@@ -186,7 +195,11 @@ pub fn format_statusline(records: &[LoopRecord]) -> Option<String> {
     let refs: Vec<String> = prs
         .iter()
         .map(|&(owner, repo, n)| {
-            let base = if multi_repo { format!("{}#{}", repo, n) } else { format!("#{}", n) };
+            let text = if multi_repo { format!("{}#{}", repo, n) } else { format!("#{}", n) };
+            let base = match link {
+                Some(link) => osc8(&link(owner, repo, n), &text),
+                None => text,
+            };
             match mode_for_pr(records, owner, repo, n) {
                 Some(LoopMode::UntilHappy) => format!("{} (until happy)", base),
                 _ => base,
@@ -231,13 +244,13 @@ mod tests {
 
     #[test]
     fn statusline_empty_is_none() {
-        assert_eq!(format_statusline(&[]), None);
+        assert_eq!(format_statusline(&[], None), None);
     }
 
     #[test]
     fn statusline_single_plain() {
         let r = [rec(1, "r", 1234, LoopMode::Actionable)];
-        assert_eq!(format_statusline(&r).unwrap(), "pr-looping on 1 PR: #1234");
+        assert_eq!(format_statusline(&r, None).unwrap(), "pr-looping on 1 PR: #1234");
     }
 
     #[test]
@@ -247,7 +260,7 @@ mod tests {
             rec(2, "r", 4567, LoopMode::UntilHappy),
         ];
         assert_eq!(
-            format_statusline(&r).unwrap(),
+            format_statusline(&r, None).unwrap(),
             "pr-looping on 2 PRs: #1234, #4567 (until happy)"
         );
     }
@@ -258,13 +271,23 @@ mod tests {
             rec(1, "r", 7, LoopMode::UntilHappy),
             rec(2, "r", 7, LoopMode::Actionable),
         ];
-        assert_eq!(format_statusline(&r).unwrap(), "pr-looping on 1 PR: #7");
+        assert_eq!(format_statusline(&r, None).unwrap(), "pr-looping on 1 PR: #7");
     }
 
     #[test]
     fn statusline_qualifies_when_multi_repo() {
         let r = [rec(1, "a", 1, LoopMode::Actionable), rec(2, "b", 2, LoopMode::Actionable)];
-        assert_eq!(format_statusline(&r).unwrap(), "pr-looping on 2 PRs: a#1, b#2");
+        assert_eq!(format_statusline(&r, None).unwrap(), "pr-looping on 2 PRs: a#1, b#2");
+    }
+
+    #[test]
+    fn statusline_links_each_pr_ref() {
+        let r = [rec(1, "r", 7, LoopMode::UntilHappy)];
+        let link = |o: &str, repo: &str, n: u64| format!("http://hub/pr/{o}/{repo}/{n}/");
+        assert_eq!(
+            format_statusline(&r, Some(&link)).unwrap(),
+            "pr-looping on 1 PR: \x1b]8;;http://hub/pr/o/r/7/\x1b\\#7\x1b]8;;\x1b\\ (until happy)"
+        );
     }
 
     #[test]
