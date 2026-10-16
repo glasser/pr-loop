@@ -404,6 +404,7 @@ fn loop_pill_reflects_in_progress_waits() {
         mode,
         checkout_path: "/tmp".to_string(),
         claude_pid: None,
+        claude_session_id: None,
         started_at: loops::now_secs(),
         timeout_secs: 1800,
     };

@@ -1,7 +1,8 @@
 // Machine-wide registry of in-progress `--wait-until-actionable[-or-happy]`
 // runs, so other things can tell which PRs are actively being looped on right
-// now: the hub's PR page header and the Claude Code status line via
-// `pr-loop statusline`.
+// now: the hub's PR page header (any loop on that PR, from any session), and
+// the Claude Code status line via `pr-loop statusline` (only loops started by
+// that Claude Code session — see `filter_for_session`).
 //
 // Each waiting process drops a small JSON file named `<pid>.json` into
 // `loops_dir()` and removes it when the wait ends. That removal can't be
@@ -38,6 +39,11 @@ pub struct LoopRecord {
     pub mode: LoopMode,
     pub checkout_path: String,
     pub claude_pid: Option<u32>,
+    /// `CLAUDE_CODE_SESSION_ID` of the Claude Code session that ran the
+    /// wait, if any. Matches the `session_id` Claude Code passes a
+    /// statusLine command on stdin.
+    #[serde(default)]
+    pub claude_session_id: Option<String>,
     /// Unix seconds.
     pub started_at: u64,
     pub timeout_secs: u64,
@@ -152,6 +158,41 @@ pub fn list_active_now() -> Vec<LoopRecord> {
     }
 }
 
+/// The PID of the Claude Code process currently running `session_id`, per
+/// its `<sessions_dir>/<pid>.json` state file (`~/.claude/sessions`).
+pub fn claude_pid_for_session(sessions_dir: &Path, session_id: &str) -> Option<u32> {
+    std::fs::read_dir(sessions_dir).ok()?.flatten().find_map(|entry| {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            return None;
+        }
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+        if v.get("sessionId")?.as_str()? != session_id {
+            return None;
+        }
+        v.get("pid")?.as_u64().and_then(|p| u32::try_from(p).ok())
+    })
+}
+
+/// Just the loops started from one Claude Code session: matched by session
+/// ID, or by the Claude Code PID now running that session (which also
+/// catches a wait started before a `/clear` gave the process a new session
+/// ID).
+pub fn filter_for_session(
+    records: &[LoopRecord],
+    session_id: &str,
+    claude_pid: Option<u32>,
+) -> Vec<LoopRecord> {
+    records
+        .iter()
+        .filter(|r| {
+            r.claude_session_id.as_deref() == Some(session_id)
+                || (claude_pid.is_some() && r.claude_pid == claude_pid)
+        })
+        .cloned()
+        .collect()
+}
+
 /// Wrap `text` in an OSC 8 terminal hyperlink to `url`.
 fn osc8(url: &str, text: &str) -> String {
     format!("\x1b]8;;{}\x1b\\{}\x1b]8;;\x1b\\", url, text)
@@ -227,6 +268,7 @@ mod tests {
             mode,
             checkout_path: "/x".into(),
             claude_pid: None,
+            claude_session_id: None,
             started_at: 1000,
             timeout_secs: 1800,
         }
@@ -288,6 +330,44 @@ mod tests {
             format_statusline(&r, Some(&link)).unwrap(),
             "pr-looping on 1 PR: \x1b]8;;http://hub/pr/o/r/7/\x1b\\#7\x1b]8;;\x1b\\ (until happy)"
         );
+    }
+
+    #[test]
+    fn filter_for_session_matches_session_id_or_claude_pid() {
+        let mut by_session = rec(1, "r", 1, LoopMode::Actionable);
+        by_session.claude_session_id = Some("s1".into());
+        let mut by_pid = rec(2, "r", 2, LoopMode::Actionable);
+        by_pid.claude_pid = Some(500);
+        by_pid.claude_session_id = Some("old-session".into());
+        let mut other = rec(3, "r", 3, LoopMode::Actionable);
+        other.claude_pid = Some(600);
+        other.claude_session_id = Some("s2".into());
+        let untagged = rec(4, "r", 4, LoopMode::Actionable);
+        let all = [by_session.clone(), by_pid.clone(), other, untagged];
+
+        assert_eq!(filter_for_session(&all, "s1", Some(500)), vec![by_session.clone(), by_pid]);
+        assert_eq!(filter_for_session(&all, "s1", None), vec![by_session]);
+        assert!(filter_for_session(&all, "nope", None).is_empty());
+    }
+
+    #[test]
+    fn claude_pid_for_session_scans_session_files() {
+        let dir = tempdir();
+        std::fs::write(dir.join("100.json"), r#"{"pid":100,"sessionId":"a"}"#).unwrap();
+        std::fs::write(dir.join("200.json"), r#"{"pid":200,"sessionId":"b","cwd":"/x"}"#).unwrap();
+        std::fs::write(dir.join("300.json"), b"garbage").unwrap();
+        std::fs::write(dir.join("200.abc.key"), b"{}").unwrap();
+        assert_eq!(claude_pid_for_session(&dir, "b"), Some(200));
+        assert_eq!(claude_pid_for_session(&dir, "zzz"), None);
+        assert_eq!(claude_pid_for_session(Path::new("/nonexistent"), "b"), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn record_without_session_id_still_parses() {
+        let old = r#"{"pid":1,"owner":"o","repo":"r","pr_number":1,"mode":"actionable","checkout_path":"/x","claude_pid":null,"started_at":1,"timeout_secs":1}"#;
+        let r: LoopRecord = serde_json::from_str(old).unwrap();
+        assert_eq!(r.claude_session_id, None);
     }
 
     #[test]

@@ -565,10 +565,29 @@ fn main() {
 /// (via `gh api`, no extra credentials needed).
 /// `pr-loop statusline`. Must stay fast and must never fail: a non-zero exit
 /// blanks the status line, and so does empty output, which is what we want
-/// when nothing is looping. Claude Code pipes session JSON on stdin; we don't
-/// need it.
+/// when nothing is looping.
+///
+/// Claude Code pipes session JSON on stdin; when it carries a `session_id`,
+/// only that session's loops are shown. Run by hand (no stdin JSON), it
+/// shows every loop on the machine.
 fn run_statusline() {
-    let records = loops::list_active_now();
+    use std::io::{IsTerminal, Read};
+    let mut input = String::new();
+    if !std::io::stdin().is_terminal() {
+        let _ = std::io::stdin().read_to_string(&mut input);
+    }
+    let session_id = serde_json::from_str::<serde_json::Value>(&input)
+        .ok()
+        .and_then(|v| v.get("session_id")?.as_str().map(str::to_string));
+
+    let mut records = loops::list_active_now();
+    if let Some(session_id) = session_id {
+        let claude_pid = std::env::var("HOME").ok().and_then(|home| {
+            loops::claude_pid_for_session(&PathBuf::from(home).join(".claude/sessions"), &session_id)
+        });
+        records = loops::filter_for_session(&records, &session_id, claude_pid);
+    }
+
     let port = config::load().hub_port();
     let link = |owner: &str, repo: &str, n: u64| hub::pr_page_url(port, owner, repo, n);
     if let Some(line) = loops::format_statusline(&records, Some(&link)) {
@@ -590,6 +609,7 @@ fn register_loop(pr_context: &PrContext, mode: loops::LoopMode, timeout_secs: u6
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default(),
         claude_pid: std::env::var("CLAUDE_PID").ok().and_then(|s| s.parse().ok()),
+        claude_session_id: std::env::var("CLAUDE_CODE_SESSION_ID").ok().filter(|s| !s.is_empty()),
         started_at: loops::now_secs(),
         timeout_secs,
     };

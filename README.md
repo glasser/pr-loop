@@ -45,8 +45,11 @@ pr-loop --wait-until-actionable-or-happy --maintain-status
 While a `--wait-until-*` run is in progress, it records itself in
 `~/.local/state/pr-loop/loops/` (or `$XDG_STATE_HOME/pr-loop/loops/`).
 `pr-loop statusline` prints a summary such as
-`pr-looping on 2 PRs: #1234, #4567 (until happy)`. When no loops are running it
-prints nothing. The `(until happy)` marker appears only for
+`pr-looping on 1 PR: #1234 (until happy)`. It only lists loops started by the
+Claude Code session whose status line it's rendering. That session is identified
+by the `session_id` Claude Code passes on stdin. Run by hand, it lists every loop
+on the machine. Each PR number links to that PR's hub page. When no matching loops
+are running it prints nothing. The `(until happy)` marker appears only for
 `--wait-until-actionable-or-happy`. Add this to `~/.claude/settings.json`:
 
 ```json
@@ -54,8 +57,8 @@ prints nothing. The `(until happy)` marker appears only for
 ```
 
 Keep `refreshInterval` in the config. Without it, the status line doesn't refresh
-while the agent is blocked inside a wait. The hub's PR page shows the same
-information as a "looping" pill in the header.
+while the agent is blocked inside a wait. The hub's PR page shows a "looping"
+pill in the header whenever any session has a loop running on that PR.
 
 ### Reply to Review Comments
 
