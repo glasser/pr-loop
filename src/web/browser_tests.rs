@@ -59,6 +59,24 @@ fn start_test_server(state: State) -> String {
 /// is read fresh from `instance_id` on every request, so a test can mutate
 /// it after the page has loaded to simulate the hub having restarted.
 fn start_test_server_with_instance_id(state: State, instance_id: Arc<Mutex<String>>) -> String {
+    start_test_server_full(state, instance_id, None)
+}
+
+/// Like `start_test_server`, but `/api/state` reports in-progress loops from
+/// `loops_dir` (see `crate::loops`) instead of never reporting any.
+fn start_test_server_with_loops_dir(state: State, loops_dir: PathBuf) -> String {
+    start_test_server_full(
+        state,
+        Arc::new(Mutex::new("test-instance".to_string())),
+        Some(loops_dir),
+    )
+}
+
+fn start_test_server_full(
+    state: State,
+    instance_id: Arc<Mutex<String>>,
+    loops_dir: Option<PathBuf>,
+) -> String {
     let shared = Arc::new(Shared {
         pr_context: PrContext {
             owner: "glasser".to_string(),
@@ -72,6 +90,7 @@ fn start_test_server_with_instance_id(state: State, instance_id: Arc<Mutex<Strin
         last_seen: Mutex::new(Instant::now()),
         merged: AtomicBool::new(false),
         stop: AtomicBool::new(false),
+        loops_dir,
     });
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
@@ -365,6 +384,60 @@ fn pr_status_badge_renders_for_each_state() {
         );
 
         tab.close(false).ok();
+    }
+}
+
+/// The header shows "looping" while a `--wait-until-*` record for this PR
+/// exists (with a live PID), adds "until happy" only for the
+/// `--wait-until-actionable-or-happy` mode, and shows nothing otherwise —
+/// including when the only record is for a different PR.
+#[test]
+fn loop_pill_reflects_in_progress_waits() {
+    let browser = Browser::default().expect("launch/fetch Chromium");
+
+    let record = |pr_number: u64, mode: loops::LoopMode| loops::LoopRecord {
+        // Our own PID, so the liveness check passes.
+        pid: std::process::id(),
+        owner: "glasser".to_string(),
+        repo: "pr-loop-test-repo".to_string(),
+        pr_number,
+        mode,
+        checkout_path: "/tmp".to_string(),
+        claude_pid: None,
+        started_at: loops::now_secs(),
+        timeout_secs: 1800,
+    };
+    let cases = [
+        (Some(record(1, loops::LoopMode::Actionable)), Some("⟳ looping")),
+        (Some(record(1, loops::LoopMode::UntilHappy)), Some("⟳ looping until happy")),
+        (Some(record(2, loops::LoopMode::Actionable)), None),
+        (None, None),
+    ];
+
+    for (i, (rec, expected)) in cases.into_iter().enumerate() {
+        let dir = std::env::temp_dir().join(format!(
+            "pr-loop-browser-loops-{}-{}",
+            std::process::id(),
+            i
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let _guard = rec.as_ref().map(|r| loops::register(&dir, r).unwrap());
+
+        let base = start_test_server_with_loops_dir(
+            State { pr: Some(pr_dto("open", false, false)), ..Default::default() },
+            dir.clone(),
+        );
+        let tab = browser.new_tab().expect("open tab");
+        // The first render happens after the first /api/state response, so
+        // once the header is up, loop_mode has been applied.
+        navigate_and_wait_for(&tab, &base, ".pr-status");
+        let pill = tab.find_element(".loop-pill").ok().map(|e| e.get_inner_text().unwrap());
+        assert_eq!(pill.as_deref(), expected, "case {i}");
+
+        tab.close(false).ok();
+        drop(_guard);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -712,6 +785,7 @@ fn start_test_server_with_shared_state(state: State) -> (String, Arc<Shared>) {
         last_seen: Mutex::new(Instant::now()),
         merged: AtomicBool::new(false),
         stop: AtomicBool::new(false),
+        loops_dir: None,
     });
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");

@@ -11,6 +11,7 @@
 // `hub::FRESHNESS_WINDOW`.
 
 use crate::cc_status::{read_cc_status, read_cc_status_for_pid, CcStatus};
+use crate::loops::{self, LoopMode};
 use crate::checks::{Check, CheckStatus, ChecksClient, RealChecksClient};
 use crate::commit_edits::{CommitEditsClient, RealCommitEditsClient};
 use crate::commits::{CommitsClient, PrCommit, PrState, RealCommitsClient};
@@ -219,6 +220,10 @@ struct StateResponse<'a> {
     #[serde(flatten)]
     state: &'a State,
     cc_status: Option<CcStatus>,
+    /// Set while some `pr-loop --wait-until-*` process (anywhere on this
+    /// machine) is waiting on this PR — see `crate::loops`. Read fresh on
+    /// every poll, like `cc_status`.
+    loop_mode: Option<LoopMode>,
     /// True when the `pr-loop` binary on disk has been rebuilt since the hub
     /// process started. The UI surfaces a "restart" pill when this flips.
     update_available: bool,
@@ -262,6 +267,10 @@ pub struct Shared {
     /// Last time `/api/register` refreshed this tracker. The hub's reaper
     /// uses this to decide when to tear the tracker down.
     pub last_seen: Mutex<Instant>,
+    /// Where to look for in-progress `--wait-until-*` records (see
+    /// `crate::loops`). `None` means never report a loop. Injected so tests
+    /// don't read the real per-user state directory.
+    loops_dir: Option<PathBuf>,
     /// Set once a fetch observes the PR as merged. Unlike staleness this is
     /// permanent — a merged PR can't become unmerged — so once set, the hub
     /// tears the tracker down regardless of how recently it was pinged.
@@ -341,6 +350,7 @@ pub fn spawn_tracker(
         last_seen: Mutex::new(Instant::now()),
         merged: AtomicBool::new(false),
         stop: AtomicBool::new(false),
+        loops_dir: loops::loops_dir(),
         pr_context,
     });
 
@@ -448,9 +458,15 @@ pub fn handle_request(
             let cc_status = claude_pid
                 .and_then(read_cc_status_for_pid)
                 .or_else(|| read_cc_status(&checkout_path));
+            let pr = &shared.pr_context;
+            let loop_mode = shared.loops_dir.as_deref().and_then(|dir| {
+                let active = loops::list_active(dir, loops::now_secs(), &loops::pid_alive);
+                loops::mode_for_pr(&active, &pr.owner, &pr.repo, pr.pr_number)
+            });
             let response = StateResponse {
                 state: &state,
                 cc_status,
+                loop_mode,
                 update_available: ctx.update_available,
                 checkout_path: checkout_path.to_string_lossy().into_owned(),
                 claude_pid,
@@ -952,6 +968,7 @@ mod tests {
             last_seen: Mutex::new(Instant::now()),
             merged: AtomicBool::new(false),
             stop: AtomicBool::new(false),
+            loops_dir: None,
         }
     }
 

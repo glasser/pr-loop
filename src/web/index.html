@@ -241,6 +241,15 @@
   .pr-status.merged { color: var(--merged-fg); }
   .pr-status.closed { color: var(--danger-fg); }
   .pr-status.queued { color: var(--accent); }
+  .loop-pill {
+    flex-shrink: 0;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 999px;
+    color: var(--accent);
+    background: color-mix(in srgb, currentColor 15%, transparent);
+  }
   #header a { color: var(--accent); text-decoration: none; }
   #header a:hover { text-decoration: underline; }
   #header .meta {
@@ -1827,6 +1836,12 @@ function App() {
             ${data.pr.url
               ? html`<a href=${data.pr.url} target="_blank">${data.pr.owner}/${data.pr.repo} #${data.pr.pr_number}</a>`
               : html`${data.pr.owner}/${data.pr.repo} #${data.pr.pr_number}`}
+            ${data.loop_mode && html`<span
+              class="loop-pill"
+              title=${data.loop_mode === 'until_happy'
+                ? 'pr-loop --wait-until-actionable-or-happy is running: stops on its own once CI passes with nothing to address'
+                : 'pr-loop --wait-until-actionable is running on this PR'}
+            >⟳ looping${data.loop_mode === 'until_happy' ? ' until happy' : ''}</span>`}
             ${data.pr.title && html`<span class="pr-title">${data.pr.title}</span>`}
           </h1>
           <div class="meta">
