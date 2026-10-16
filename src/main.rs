@@ -14,6 +14,7 @@ mod gh_actions;
 mod git;
 mod github;
 mod hub;
+mod loops;
 #[cfg(test)]
 mod graphql_validation;
 mod pr;
@@ -124,6 +125,16 @@ fn main() {
                     println!("{}", json);
                 }
                 None => println!("<no CcStatus computed>"),
+            }
+            return;
+        }
+        Some(Command::Statusline) => {
+            // Claude Code pipes session JSON on stdin; we don't need it.
+            // Must stay fast and must never fail: a non-zero exit blanks the
+            // status line, and so does empty output, which is what we want
+            // when nothing is looping.
+            if let Some(line) = loops::format_statusline(&loops::list_active_now()) {
+                println!("{}", line);
             }
             return;
         }
@@ -381,7 +392,10 @@ fn main() {
             run_view_state_command(&view_state_client, &pr_context, action);
         }
 
-        Some(Command::Hub { .. }) | Some(Command::Config { .. }) | Some(Command::CcStatus) => {
+        Some(Command::Hub { .. })
+        | Some(Command::Config { .. })
+        | Some(Command::CcStatus)
+        | Some(Command::Statusline) => {
             // Handled above before setup; unreachable.
             unreachable!();
         }
@@ -406,7 +420,8 @@ fn main() {
 
             // If --wait-until-actionable, poll until something needs attention
             if cli.wait_until_actionable {
-                match wait_until_actionable(
+                let loop_guard = register_loop(&pr_context, loops::LoopMode::Actionable, cli.timeout);
+                let result = wait_until_actionable(
                     &checks_client,
                     &threads_client,
                     &commit_edits_client,
@@ -418,7 +433,9 @@ fn main() {
                     cli.timeout,
                     cli.poll_interval,
                     &my_login,
-                ) {
+                );
+                drop(loop_guard);
+                match result {
                     Ok(WaitResult::Actionable) => {
                         eprintln!("PR is now actionable.");
                     }
@@ -439,7 +456,8 @@ fn main() {
 
             // If --wait-until-actionable-or-happy, poll until actionable or happy
             if cli.wait_until_actionable_or_happy {
-                match wait_until_actionable_or_happy(
+                let loop_guard = register_loop(&pr_context, loops::LoopMode::UntilHappy, cli.timeout);
+                let result = wait_until_actionable_or_happy(
                     &checks_client,
                     &threads_client,
                     &commit_edits_client,
@@ -453,7 +471,9 @@ fn main() {
                     cli.poll_interval,
                     cli.min_wait_after_push,
                     &my_login,
-                ) {
+                );
+                drop(loop_guard);
+                match result {
                     Ok(WaitResult::Actionable) => {
                         eprintln!("PR is now actionable.");
                     }
@@ -549,6 +569,26 @@ fn main() {
 /// Fetch CI failure info (logs + test failures) for failed checks. Handles
 /// both CircleCI (via their API; requires CIRCLECI_TOKEN) and GitHub Actions
 /// (via `gh api`, no extra credentials needed).
+/// Announce an in-progress wait in the machine-wide loop registry (see
+/// `loops.rs`). Best-effort: `None` just means the wait goes untracked.
+fn register_loop(pr_context: &PrContext, mode: loops::LoopMode, timeout_secs: u64) -> Option<loops::LoopGuard> {
+    let dir = loops::loops_dir()?;
+    let record = loops::LoopRecord {
+        pid: std::process::id(),
+        owner: pr_context.owner.clone(),
+        repo: pr_context.repo.clone(),
+        pr_number: pr_context.pr_number,
+        mode,
+        checkout_path: std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        claude_pid: std::env::var("CLAUDE_PID").ok().and_then(|s| s.parse().ok()),
+        started_at: loops::now_secs(),
+        timeout_secs,
+    };
+    loops::register(&dir, &record)
+}
+
 fn fetch_ci_failure_info(creds: &Credentials, checks: &ChecksSummary) -> CircleCiFailureInfo {
     let circleci_client = creds
         .circleci_token

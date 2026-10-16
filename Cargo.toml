@@ -33,6 +33,9 @@ urlencoding = "2"
 # TOML parsing for ~/.config/pr-loop/config.toml
 toml = "0.8"
 
+# kill(pid, 0) liveness checks for the in-progress-wait registry (src/loops.rs)
+libc = "0.2"
+
 [dev-dependencies]
 # Testing utilities
 tokio-test = "0.4"

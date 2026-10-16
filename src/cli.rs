@@ -173,6 +173,11 @@ pub enum Command {
     /// showing the expected state.
     CcStatus,
 
+    /// Print a one-line summary of the PRs that have a `--wait-until-*` loop
+    /// running right now (machine-wide), for use as a Claude Code
+    /// `statusLine` command. Prints nothing when no loops are running.
+    Statusline,
+
     /// Manage the per-viewer "Viewed" checkboxes on the PR's Files Changed tab.
     ViewState {
         #[command(subcommand)]

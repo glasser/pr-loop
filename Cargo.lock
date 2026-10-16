@@ -1540,6 +1540,7 @@ dependencies = [
  "clap",
  "glob",
  "headless_chrome",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",

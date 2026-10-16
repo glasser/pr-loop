@@ -40,6 +40,23 @@ pr-loop --wait-until-actionable --maintain-status
 pr-loop --wait-until-actionable-or-happy --maintain-status
 ```
 
+### Show Running Loops in the Claude Code Status Line
+
+While a `--wait-until-*` run is in progress, it records itself in
+`~/.local/state/pr-loop/loops/` (or `$XDG_STATE_HOME/pr-loop/loops/`).
+`pr-loop statusline` prints a summary such as
+`pr-looping on 2 PRs: #1234, #4567 (until happy)`. When no loops are running it
+prints nothing. The `(until happy)` marker appears only for
+`--wait-until-actionable-or-happy`. Add this to `~/.claude/settings.json`:
+
+```json
+"statusLine": { "type": "command", "command": "pr-loop statusline", "refreshInterval": 5 }
+```
+
+Keep `refreshInterval` in the config. Without it, the status line doesn't refresh
+while the agent is blocked inside a wait. The hub's PR page shows the same
+information as a "looping" pill in the header.
+
 ### Reply to Review Comments
 
 ```bash
